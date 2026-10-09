@@ -20,7 +20,7 @@
 | --- | --- |
 | `RandomImitater.pmod` | Mod 本体，约 15 KB |
 
-- **下载入口**：<待填：Release 页面链接>
+- **下载入口**：[Releases · v1.0.0](https://github.com/Xcheng-dada/pvzhe-RandomImitater/releases/tag/v1.0.0)（下载 `RandomImitater.pmod`）
 - 文件大小：14,898 字节
 - SHA-256：`E354E795A3FCE33613762CD2A0022DAF7EABE8D379C30C077A989EEA6B45FBB3`
 
