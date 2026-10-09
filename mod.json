@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "id": "randomimitater",
+  "name": "随机模仿者",
+  "version": "1.0.0",
+  "author": "小橙c",
+  "description": "新增植物「随机模仿者」（彩卡）：种下后随机开出植物或僵尸（65% 开出随机植物，35% 开出随机僵尸·敌对）。",
+  "dependencies": [],
+  "conflicts": [],
+  "provides": {
+    "Character": [
+      "RandomImitater"
+    ],
+    "CharacterSprite": [
+      "RandomImitater"
+    ],
+    "Packet": [
+      "RandomImitater"
+    ]
+  },
+  "overrides": {},
+  "scripts": [],
+  "runtimeAssembly": "Runtime/ModAssembly.dll",
+  "runtimeEntryType": "RandomImitaterEntry",
+  "runtimeApiVersion": 1,
+  "runtimeAssemblyPolicy": "optional",
+  "blueprints": [],
+  "translations": [],
+  "resources": [
+    "Resources/Cards/RandomImitater.tres",
+    "Resources/Characters/Plants/RandomImitater/Config/TowerDefensePlantRandomImitater.tres",
+    "Resources/Characters/Plants/RandomImitater/Packet/RandomImitater.tres",
+    "Resources/Characters/Plants/RandomImitater/Scene/RandomImitater.tscn",
+    "Resources/Characters/Plants/RandomImitater/Scene/RandomImitaterComponentSet.tres",
+    "Resources/Characters/Plants/RandomImitater/Sprite/RandomImitater.tscn",
+    "Runtime/ModAssembly.dll"
+  ]
+}
