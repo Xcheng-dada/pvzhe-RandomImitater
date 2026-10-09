@@ -1,0 +1,19 @@
+[gd_resource type="Resource" script_class="TowerDefensePacketConfig" format=3]
+
+[ext_resource type="Resource" path="../Characters/Plants/RandomImitater/Config/TowerDefensePlantRandomImitater.tres" id="1"]
+[ext_resource type="Script" path="res://Registry/Battle/Feature/PacketBank/Resource/Packet/TowerDefensePacketConfig.cs" id="2"]
+
+[resource]
+script = ExtResource("2")
+saveKey = "RandomImitater"
+unlockCheckList = []
+name = "随机模仿者"
+describe = "完全随机的模仿者，惊喜和惊吓并存！"
+handbookDescribe = "[color=FF0000]获取方式[/color]：[color=0000cd]Mod 植物（无需解锁）[/color]\n韧性：[color=cc241d]1000[/color]\n特点：[color=cc241d]65%概率开出随机植物 35%概率开出随机僵尸（敌对）[/color]\n"
+handbookStory = "随机模仿者旋转着，宛如风暴般裹挟着植物与僵尸，随机地投放到每个召唤它的人面前。有人因它而欣喜，也有人因它而愤怒，时不时也有挽留它的声音传来：“还会再见吗！”但随机模仿者不语，只是一味地旋转。"
+packetAnimeClip = "Idle"
+packetAnimeOffset = Vector2(21, 25)
+packetAnimeScale = Vector2(0.5, 0.5)
+characterConfig = ExtResource("1")
+type = 3
+metadata/_custom_type_script = "res://Registry/Battle/Feature/PacketBank/Resource/Packet/TowerDefensePacketConfig.cs"

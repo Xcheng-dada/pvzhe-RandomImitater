@@ -1,0 +1,17 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://Asset/Anime/Character/Plant/Chapter0/Imitater/Scene/TowerDefensePlantImitater.tscn" id="1"]
+[ext_resource type="Resource" path="../Config/TowerDefensePlantRandomImitater.tres" id="2"]
+[ext_resource type="Resource" path="./RandomImitaterComponentSet.tres" id="3"]
+
+[node name="RandomImitater" instance=ExtResource("1")]
+ComponentSet = ExtResource("3")
+config = ExtResource("2")
+packetBank = "RandomImitaterMixed"
+metadata/mod_resource_kind = "Character"
+metadata/mod_display_name = "随机模仿者"
+metadata/mod_character_category = "Plant"
+metadata/mod_character_config_path = "../Config/TowerDefensePlantRandomImitater.tres"
+metadata/mod_character_script_path = "./RandomImitater.tscn"
+metadata/mod_character_script_binding = "CompanionOnly"
+metadata/mod_character_sprite_scene = "../Sprite/RandomImitater.tscn"

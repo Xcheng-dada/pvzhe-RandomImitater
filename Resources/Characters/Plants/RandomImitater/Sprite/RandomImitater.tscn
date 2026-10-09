@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://Asset/Anime/Character/Plant/Chapter0/Imitater/Imitater.tscn" id="1"]
+
+[node name="RandomImitater" instance=ExtResource("1")]
+metadata/mod_resource_kind = "CharacterSprite"
