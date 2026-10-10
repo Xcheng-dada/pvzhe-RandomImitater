@@ -6,7 +6,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | Mod ID | `randomimitater` |
-| 当前版本 | 1.0.0 |
+| 当前版本 | 1.1.0 |
 | 作者 | 小橙c |
 | 适用游戏版本 | **0.29.0**（Windows；其它版本未测试） |
 | 分类 | 植物 · 彩卡 |
@@ -18,11 +18,11 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `RandomImitater.pmod` | Mod 本体，约 15 KB |
+| `RandomImitater.pmod` | Mod 本体，约 18 KB |
 
-- **下载入口**：[Releases · v1.0.0](https://github.com/Xcheng-dada/pvzhe-RandomImitater/releases/tag/v1.0.0)（下载 `RandomImitater.pmod`）
-- 文件大小：14,898 字节
-- SHA-256：`E354E795A3FCE33613762CD2A0022DAF7EABE8D379C30C077A989EEA6B45FBB3`
+- **下载入口**：[Releases · v1.1.0](https://github.com/Xcheng-dada/pvzhe-RandomImitater/releases/tag/v1.1.0)（下载 `RandomImitater.pmod`）
+- 文件大小：18,081 字节
+- SHA-256：`1C88B4F03FABE7E9F6E6BC01E6A9BDDDCD108C996B167113215E212F2F62090E`
 
 > 校验方法（可选）：`Get-FileHash .\RandomImitater.pmod -Algorithm SHA256`
 
@@ -128,6 +128,18 @@ A：**刻意设成免费的。** 因为它有一定概率开出一只**敌对僵
 **Q：开出植物还要另外付阳光吗？**
 
 A：不用，全程都不花阳光。开出的植物直接就是你的。
+
+## 更新日志
+
+**1.1.0**
+
+- 修「重选上次卡牌」：以前重复选的本卡只会回来 1 张，现在份数和顺序都完整还原。
+- 修「保存/读取选卡分组」（6 个分组都能用）：以前分组里的本卡读回来同样只剩 1 张。
+- 补上「重选」的音效。
+
+**1.0.0**
+
+- 首个版本。
 
 ## 兼容性与已知限制
 

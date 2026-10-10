@@ -171,41 +171,119 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	private bool _hookErrLogged;
 
 	/// <summary>
-	/// ★ 「重选上次卡牌」补齐重复卡：让本卡的 5 张（或任意多张）能被完整记忆/恢复。
+	/// ★ 「重选上次卡牌」接管：让本卡的多份（5 张等）在重选后**份数与顺序都精确还原**。
 	///
 	/// 塌陷点（IL 证据，见分析报告）：
 	///   写入侧 <c>EmitChooseOverAsync</c> 是 foreach + <c>Array.Add</c>，**不去重**，
-	///   5 张本卡会原样写成 5 个重复串 —— 存档是好的。
-	///   读取侧 <c>ReSelectButtonPressed</c> → <c>DeleteAllPacket()</c> → <c>PacketListChoose()</c>，
+	///   5 张本卡会原样写成 5 个重复串 —— **存档本身是好的**。
+	///   读取侧 <c>ReSelectButtonPressed</c> → <c>DeleteAllPacket()</c> → <c>PacketListChoose(整个数组)</c>，
 	///   而 <c>PacketListChoose</c> 里 IL_0077 <c>seedBank.HasPacket(name)</c> + IL_007C <c>brtrue</c>
-	///   把第 2..5 个同 key 的条目**直接 continue 掉**（<c>HasPacket</c> 查的是
-	///   <c>packetNameSet</c> 这个当 HashSet 用的字典，5 张只有 1 个 key）。
-	/// ⇒ 所以「选了 5 张随机模仿者，重选只回来 1 张」。
+	///   把第 2..5 个同 key 条目**直接 continue 掉**（<c>HasPacket</c> 查的是
+	///   <c>packetNameSet</c> 这个当 HashSet 用的字典，5 张只留下 1 个 key）。
+	///   ⇒ 「选了 5 张随机模仿者，重选只回来 1 张」。
 	///
-	/// 修法（方案 A，只动本 Mod 自己的卡，不碰任何现有内容）：
-	///   在原生 <c>ReSelectButtonPressed</c> **之后**再挂一个处理器（signal 按连接顺序执行），
-	///   读同一份存档数组数出「本卡需要 N 张」，数出卡槽里「已有 M 张」，差额用原生
-	///   <c>CreateAnime</c> 补上（自带飞入动画；它内部 IL_00BA 直接调 <c>AddPacket</c>，
-	///   而 <c>AddPacket</c> 自身**没有** HasPacket 去重守卫 ⇒ 可以补重复卡）。
-	///   补之前照例判 <c>CanAddPacket()</c>（槽位总数上限仍由引擎把着）。
+	/// 为什么不能靠「原生跑完再补齐」（旧版做法，已废弃）：
+	///   <c>AddPacket</c> 只能**追加到 packetList 末尾**。而玩家习惯「先选本卡、再补灰烬植物」，
+	///   存档顺序是 <c>[R,R,R,R,R,灰1,灰2]</c>，原生只恢复出 <c>[R,灰1,灰2]</c>，
+	///   再追加 4 张只会得到 <c>[R,灰1,灰2,R,R,R,R]</c> —— **顺序错了**。
+	///   另外原生恢复走 Tween（异步入槽），补齐时机与它竞争，会出现「第一次点只补 1 张」。
+	///
+	/// 现在的做法（接管按钮 + 按存档顺序直接重建）：
+	///   把按钮的 <c>OnPressed</c> **整体替换**成我们的处理器（原委托留作兜底）。
+	///   点一次「重选」时：
+	///     ① <c>DeleteAllPacket()</c> 清空；
+	///     ② 按**存档顺序**逐项 <c>AddPacket(cfg, false)</c> + <c>StartInit()</c> + <c>alive = true</c>。
+	///
+	///   ⚠️ 这里**不能**用「逐张调用原生 <c>PacketListChoose([key])</c>」代替（踩过这个坑）：
+	///   它会走到 <c>PacketChoose(poolCard)</c>，而那个方法是**开关式**的 ——
+	///     IL_003D <c>FindSelectedPacket(saveKey)</c> → 找到同 key 的已选卡就**移除它**，
+	///     找不到才加入。
+	///   于是喂第 2 张本卡时，刚加进去的第 1 张会被删掉 ⇒ 5 张喂完只剩 1 张，等于没改。
+	///   （清 <c>packetNameSet</c> 只能绕过 <c>HasPacket</c>，绕不过 <c>FindSelectedPacket</c>。）
+	///
+	///   <c>AddPacket</c> 则**没有任何**去重/开关守卫：<c>packetNameSet</c> 只被写入、不被查询，
+	///   所以同一个 key 可以重复入槽，且每次都追加到 <c>packetList</c> 末尾 ⇒
+	///   按存档顺序调用即可**精确还原份数与顺序**。
+	///
+	/// 代价：这条路径没有卡牌飞入动画（<c>CreateAnime</c> 是 Tween 异步入槽，
+	///   正是旧版「第一次点只补 1 张」的根因），卡片直接出现在卡槽里。
+	///   换取的是份数与顺序都精确 —— 这正是玩家要的。
+	///
+	/// 收窄原则：**只有存档里本卡 ≥2 张时才接管**；其余情况原样调用原生处理器，
+	/// 玩家与其它卡的行为和没装 Mod 时完全一致。
+	/// 任何异常都退回原生处理器 ⇒ 最坏情况 = 原生行为（只回来 1 张），**按钮不会失灵**。
 	/// </summary>
-	private static readonly bool ReselectTopUp = false;
+	private static readonly bool ReselectTakeover = true;
 
 	/// <summary>存档里「上次卡牌选择」的键名（与游戏 <c>EmitChooseOverAsync</c> 用的串一致）。</summary>
 	private const string ReSlectKey = "PacketReSlect";
 
-	/// <summary>最近一次扫到的本卡池卡（补齐时借用它的位置做飞入动画起点）。</summary>
+	/// <summary>IZM（僵尸模式）下的存档键名 —— 与游戏 <c>EmitChooseOverAsync</c> 的分支一致。</summary>
+	private const string ReSlectKeyIzm = "ZombiePacketReSlect";
+
+	/// <summary>
+	/// 是否接管「保存/读取选卡分组」的**读取**侧（共 6 个分组）。
+	///
+	/// ★ 为什么也要接管：`LoadPacketGroup(id)` 与「重选上次卡牌」是**同一条**路径 ——
+	///   IL_008a-IL_00a1：`seedBank.DeleteAllPacket()` + `PacketListChoose(存档)`。
+	///   而 `PacketListChoose` 用按 saveKey 去重的 `packetNameSet` 判「已有」，
+	///   所以分组里存了 5 张本卡，读回来也只会进 1 张（与重选完全相同的 bug）。
+	///
+	/// ★ 只接管**读取**：`SavePacketGroup(id)` 是直接遍历 `seedBank.packetList`
+	///   把每张卡的 key 写进存档（IL_0006-IL_005d），**本来就能正确保存重复卡**
+	///   ⇒ 保存侧不需要也不应该动。
+	/// </summary>
+	private static readonly bool GroupTakeover = true;
+
+	/// <summary>分组存档键前缀（普通模式）：`PacketGroup1` … `PacketGroup6`。</summary>
+	private const string GroupKeyPrefix = "PacketGroup";
+
+	/// <summary>分组存档键前缀（IZM 模式）：`ZombiePacketGroup1` … `ZombiePacketGroup6`。</summary>
+	private const string GroupKeyPrefixIzm = "ZombiePacketGroup";
+
+	/// <summary>分组数量（游戏里就是 6 个）。</summary>
+	private const int GroupCount = 6;
+
+	/// <summary>最近一次扫到的本卡池卡（接管时用它判断界面是否就绪）。</summary>
 	private TowerDefenseInGamePacketShow _myPoolCard;
 
 	/// <summary>
-	/// 「重选」按下后的等待帧数。>0 表示引擎自己的 DeleteAllPacket + PacketListChoose
-	/// 可能还没跑完，先别动；归零那一帧才做补齐。
+	/// 被我们替换掉的**原生**「重选」处理器。
+	/// 我们的处理器一旦出错（或判定不该接管），就原样调用它 ⇒ 退化为原生行为。
 	/// </summary>
-	private int _reselectWaitFrames;
+	private Delegate _reselectOriginal;
 
 	/// <summary>日志去重标记。</summary>
 	private bool _reselectLogged;
 	private bool _reselectErrLogged;
+	private bool _reselectTakeoverLogged;
+	private bool _reselectRebuildLogged;
+
+	/// <summary>
+	/// 按下「重选」后**期望**的卡槽 key 序列（保持存档顺序）。
+	/// 非 null 时 `DriveReselectReconcile()` 会盯几帧，核对是否被原生路径覆盖。
+	/// </summary>
+	private List<string> _reselectDesired;
+
+	/// <summary>还要连续核对几帧（都一致就收工）。</summary>
+	private int _reselectWatch;
+
+	/// <summary>期望的本卡张数（核对的判据：只在本卡变少时才重建）。</summary>
+	private int _reselectDesiredMine;
+
+	/// <summary>本次已重建次数（上限 4，防止与原生来回拉锯）。</summary>
+	private int _reselectAttempts;
+
+	/// <summary>分组读取的日志去重标记。</summary>
+	private bool _groupLogged;
+	private bool _groupLogged2;
+	private bool _groupErrLogged;
+
+	/// <summary>
+	/// 每个分组按钮当前的**原生** `OnLoadGroup` 底稿（按按钮实例 ID 记）。
+	/// 与重选按钮同理：我们要整次重建，所以要拦住原生那条只会进 1 张的路径。
+	/// </summary>
+	private readonly Dictionary<ulong, Delegate> _groupOriginal = new Dictionary<ulong, Delegate>();
 
 	// ================================================================ 生命周期
 
@@ -288,9 +366,15 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			{
 				DriveInfiniteSelect();
 			}
-			if (ReselectTopUp)
+			if (ReselectTakeover)
 			{
 				DriveReselectHook();
+				// 按下后盯几帧：万一还有一条原生 Godot 连线把结果覆盖掉，就重建回来。
+				DriveReselectReconcile();
+			}
+			if (GroupTakeover)
+			{
+				DriveGroupHook();
 			}
 			// 场上有模仿者时，逐帧把「免咬」开关按回可被咬的取值
 			// （引擎进旋转状态会自己设无敌/免咬，只在 _Ready 写一次会被覆写）
@@ -537,38 +621,37 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 		}
 	}
 
-	// ================================================================ 重选记忆（补齐重复卡）
+	// ================================================================ 重选记忆（接管按钮）
 
 	/// <summary>
-	/// 每帧看一眼选卡界面的「重选上次卡牌」按钮，把我们的补齐处理器挂到它的
-	/// `OnPressed` 上。
+	/// 每帧看一眼选卡界面的「重选上次卡牌」按钮，把它的 `OnPressed` **整体替换**成
+	/// 我们的处理器（原生委托存进 `_reselectOriginal` 作兜底）。
 	///
-	/// ★ 挂在按钮上而不是直接改 `ReSelectButtonPressed`：本 Mod 不碰游戏任何现有逻辑，
-	///   点一次「重选」多走一次我们自己的补齐；卸载 Mod 后按钮行为原样。
-	/// ★ 处理器本身**只立个标记**，真正的补齐等到下一帧 `process_frame` 才做。
-	///   这样即使游戏之后又把它的处理器 Combine 到我们后面，补齐也一定发生在
-	///   「原生清空 + 恢复」整体结束之后 —— 不依赖处理器先后顺序。
+	/// ★ 为什么要替换而不是追加：追加只能在原生恢复完之后「补差额」，而 `AddPacket`
+	///   只会追加到 `packetList` 末尾 ⇒ 玩家「先选本卡、后选灰烬」时顺序必然错；
+	///   更要命的是原生 `PacketListChoose` 用按 saveKey 去重的 `packetNameSet` 判「已有」，
+	///   重复的本卡**最多只能恢复 1 张**（见 `OnReSelectPressed` 的注释）。
+	///   替换后由我们自己按存档顺序逐张重建，份数与顺序才都对得上。
+	/// ★ 只替换**这一个按钮**，且处理器内部先判断「存档里本卡是否 ≥2 张」：
+	///   不满足就原样调用 `_reselectOriginal`，其它卡与普通玩家的体验完全不变。
 	/// </summary>
 	private void DriveReselectHook()
 	{
-		// 「重选」按下后等 2 帧：让引擎的 DeleteAllPacket() + PacketListChoose() 先跑完，
-		// 再一次性补齐。只补一次，不会像之前那样反复触发几十次。
-		if (_reselectWaitFrames > 0)
-		{
-			_reselectWaitFrames--;
-			if (_reselectWaitFrames == 0)
-			{
-				TopUpReselect();
-			}
-			return;
-		}
-		if (InfiniteSelect && _mineSeen == 0)
-		{
-			// 无限选取那套已经逐帧扫过卡片节点了，用它的结果当门，省掉平时的节点查找。
-			// （InfiniteSelect 关掉时不能靠这个门 —— 那时 _mineSeen 永远是 0，
-			//   就自己每帧查一次按钮，开销只是几个反射 + 一次 GetNodeOrNull。）
-			return;
-		}
+		// ★ 刻意**不**用「本卡是否在卡池里可见」当门（早期版本用了 `_mineSeen == 0`）。
+		//
+		//   原因：卡池是**虚拟化**的（`BindVirtualizedPacket` / `_visiblePackets`），
+		//   本卡一旦被滚出可视区、或玩家切到了别的分类页，`_mineSeen` 就是 0。
+		//   而「重选上次卡牌」是**全局**按钮，跟本卡此刻是否显示在列表里毫无关系。
+		//   用 `_mineSeen` 当门 ⇒ 那种时刻我们根本没接管按钮 ⇒ 玩家一按就走原生，
+		//   原生把重复的本卡塌成 1 张。这正是「第一次点只补一张」的另一种成因。
+		//   代价只是每帧几次反射（`FindReselectButton` + 读一次委托字段），可接受。
+		//
+		// ★ 而且必须**每帧**继续盯着这个字段：游戏可能在 `GameInit` /
+		//   `GameInitFromProgress` 之后再次调用 `_ConnectPacketBankSignals`，
+		//   而 `add_OnPressed` 是 `Delegate.Combine` ⇒ 字段会变成 `[我们, 原生]`。
+		//   那一帧若玩家正好按下，就是「我们先跑、原生紧接着再跑」，
+		//   原生会 `DeleteAllPacket()` + 开关式 `PacketListChoose()` 把重复的本卡塌成 1 张。
+		//   每帧收敛成「只有我们」把窗口压到最小，配合按下后的核对彻底消除。
 		try
 		{
 			TowerDefenseManager mgr = TowerDefenseManager.Instance;
@@ -587,14 +670,14 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 				return;
 			}
 			// ★ 每次读**活委托**判断，不按实例 ID 记账：
-			//   游戏在 `_ConnectPacketBankSignals` 里可能重建按钮并重新 Combine（换场景 / 换分类），
+			//   游戏在 `_ConnectPacketBankSignals` 里可能重建按钮并重新挂处理器（换场景 / 换分类），
 			//   我们的处理器会随之丢掉 —— 记账式会漏挂，读活委托能自愈。
-			//   反过来也**不能**每帧无脑追加：那会让一次点按补好几轮。
-			object cur = GetEventField(btn, "OnPressed");
-			if (IsMine(cur, nameof(OnReSelectPressed)))
-			{
-				return;   // 已经挂过了
-			}
+			//
+			// ★ 判「是否已接管」用**精确等于**而不是「包含」：
+			//   若游戏之后又把自己的处理器 Combine 进来，字段会变成 `[我们, 原生]`，
+			//   只判「包含我们」会误认为已接管并直接 return，于是按下时两个都跑 ⇒ 结果退回原生。
+			//   这里每次都把字段收敛成「只有我们」，并把原生那部分留底。
+			Delegate curD = GetEventField(btn, "OnPressed") as Delegate;
 			MethodInfo handler = typeof(RandomImitaterEntry).GetMethod(
 				nameof(OnReSelectPressed),
 				BindingFlags.NonPublic | BindingFlags.Instance);
@@ -602,14 +685,25 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			{
 				return;
 			}
-			if (!AppendEventField(btn, "OnPressed", handler))
+			if (curD != null)
+			{
+				Delegate[] inv = curD.GetInvocationList();
+				if (inv.Length == 1 && inv[0].Target == this
+					&& inv[0].Method.Name == nameof(OnReSelectPressed))
+				{
+					return;   // 已经是「只有我们」的状态
+				}
+			}
+			// 从当前委托里剥掉我们的处理器，剩下的（原生的）留作兜底。
+			_reselectOriginal = StripMine(curD, nameof(OnReSelectPressed));
+			if (!ReplaceEventField(btn, "OnPressed", handler))
 			{
 				return;
 			}
-			if (!_reselectLogged)
+			if (!_reselectTakeoverLogged)
 			{
-				_reselectLogged = true;
-				Log("已挂上「重选上次卡牌」补齐处理器（重复的本卡不再被去重丢掉）。");
+				_reselectTakeoverLogged = true;
+				Log("已接管「重选上次卡牌」按钮（多张本卡按原顺序精确恢复）。");
 			}
 		}
 		catch (Exception ex)
@@ -617,7 +711,7 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			if (!_reselectErrLogged)
 			{
 				_reselectErrLogged = true;
-				Log("挂「重选」补齐处理器失败（已吞）：" + ex.Message);
+				Log("接管「重选」按钮失败（已吞）：" + ex.Message);
 			}
 		}
 	}
@@ -650,86 +744,250 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 		}
 	}
 
-	/// <summary>按钮按下：只排一个「两帧后补齐」，真正的补齐放到引擎恢复完之后。</summary>
-	private void OnReSelectPressed()
-	{
-		_reselectWaitFrames = 2;
-	}
-
 	/// <summary>
-	/// 「重选」之后补齐本卡的重复份数。
+	/// 「重选」被按下：**我们自己**完成整次恢复。
 	///
-	/// 原生 `PacketListChoose` 用 `seedBank.HasPacket(key)`（查 `packetNameSet` 这个当
-	/// HashSet 用的字典）做早退，同 key 的第 2..N 份被跳过 ⇒ 5 张只回来 1 张。
-	/// 存档数组本身是好的（写入侧纯 Append 不去重），所以这里照它数差额：
-	///   需要 N = 存档数组里 key == 本卡 的条目数
-	///   已有 M = seedBank.packetList 里 key == 本卡 的条目数
-	///   补 N-M 张（直接 `seedBank.AddPacket(cfg, false)`，不走 Tween）
+	/// 判据与收窄：只有存档里本卡 ≥2 张时才走自定义路径；否则原样调用原生处理器。
+	/// 任何异常都退回原生处理器 ⇒ 最坏情况 = 原生行为，按钮不会失灵。
 	///
-	/// 用 `AddPacket` 而不是 `bank.CreateAnime` 的原因（之前版本踩过的两个坑）：
-	///   ① `CreateAnime` 通过 Tween 把卡片排队飞入，`packetList.Add` 在 Tween 回调里才发生；
-	///      一次发 4 次 `CreateAnime`，下一帧 `OnFrame` 只看到 1 张入槽 ⇒ 循环立刻退出、
-	///      剩 3 张永远不补 —— 这就是「点一次只补 1 张、第二次才补剩下 4 张」的根因。
-	///   ② `CreateAnime` 每次只 Append 到 `packetList` 末尾 ⇒ 补齐卡排在原生 1 张之后、
-	///      整体挤到玩家之前选的非本卡后面 —— 这就是「顺序变了」的根因。
-	/// `AddPacket(cfg, false)` 一次性同步把卡片放进 `packetList` + 分配 slot（IL_00E1
-	/// `packetList.Add` + IL_00F6 `EnsurePacketSlots()`），后续帧立即可见；它内部就是
-	/// 排在当前 `packetList` 末尾，所以补齐卡依然紧跟在原生那 1 张后面 —— 这正好
-	/// 对应「玩家之前选的非本卡在前、然后 5 张本卡」的选择顺序。
-	///
-	/// 只做本卡，别的卡一张都不碰 ⇒ 不改动任何现有内容。
-	/// 受引擎自身的 `CanAddPacket()`（`packetNum &lt; seedbankPacketMax`）约束，槽位满了自然停。
+	/// ★ 为什么必须由我们**整次重建**，而不是让原生跑完再补差额：
+	///   原生 `ReSelectButtonPressed` = `DeleteAllPacket()` + `PacketListChoose()`，
+	///   而 `PacketListChoose` 对每一项都先问 `seedBank.HasPacket(key)`，
+	///   是「已有就跳过」。`HasPacket` 查的是 `packetNameSet` —— 一个**按 saveKey
+	///   去重的字典**（`Dictionary&lt;Variant,bool&gt;`），不是按卡张数。
+	///   于是存档里 5 张本卡：第 1 张加进去后 `packetNameSet[MyKey] = true`，
+	///   剩下 4 张全被判为「已有」跳过 ⇒ **永远只恢复 1 张**。
+	///   这就是「第一次点只能补一张」的根因，补差额救不了，只能自己重建。
 	/// </summary>
-	private void TopUpReselect()
+	private void OnReSelectPressed()
 	{
 		try
 		{
+			Godot.Collections.Array saved = ReadReselectSave();
+			int mine = 0;
+			if (saved != null)
+			{
+				foreach (Variant v in saved)
+				{
+					if (string.Equals(v.AsString(), MyKey, StringComparison.Ordinal))
+					{
+						mine++;
+					}
+				}
+			}
+			if (mine <= 1)
+			{
+				// 本卡只有 0~1 张：原生的恢复结果就是对的，完全交给原生。
+				CallOriginalReselect();
+				return;
+			}
+
 			TowerDefenseManager mgr = TowerDefenseManager.Instance;
 			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
 			{
-				return;
-			}
-			TowerDefenseInGameSeedBank seedBank = mgr.GetSeedBank();
-			if (seedBank == null || !GodotObject.IsInstanceValid(seedBank))
-			{
+				CallOriginalReselect();
 				return;
 			}
 
-			// ① 存档里本卡需要几张
-			int need = 0;
-			if (GameSaveManager.Instance == null
-				|| !GodotObject.IsInstanceValid(GameSaveManager.Instance))
+			// 期望状态 = 存档里所有「配置仍有效」的 key，**保持存档顺序**。
+			// （存档里可能有过期条目 —— 卡池变了 / 卡被删了 —— 取不到 config 就跳过，
+			//   否则重建时会中断。）
+			List<string> desired = new List<string>();
+			if (saved != null)
 			{
+				foreach (Variant v in saved)
+				{
+					string key = v.AsString();
+					if (string.IsNullOrEmpty(key))
+					{
+						continue;
+					}
+					TowerDefensePacketConfig cfg = null;
+					try { cfg = TowerDefenseManager.GetPacketConfig(key); } catch { }
+					if (cfg == null || !GodotObject.IsInstanceValid(cfg))
+					{
+						continue;
+					}
+					desired.Add(key);
+				}
+			}
+			if (desired.Count == 0)
+			{
+				CallOriginalReselect();
 				return;
 			}
-			Variant stored;
+
+			int gotMine = ApplyReselect(mgr, desired);
+
+			// 校验：本卡份数没恢复到位就说明这条路径不可靠 ⇒ 回退原生，保证「至少能用」。
+			if (gotMine < mine)
+			{
+				Log("「重选」接管结果不符（本卡 " + gotMine + "/" + mine + "），回退原生处理器。");
+				CallOriginalReselect();
+				return;
+			}
+
+			// ★ 按下之后仍可能被**另一条**原生路径覆盖：
+			//   `ReSelectButtonPressed` 不只挂在 C# 的 `OnPressed` 事件上，还被 Godot
+			//   当成方法名暴露（`GetGodotMethodList` / `InvokeGodotClassMethod`），
+			//   场景里可能另有一条 `pressed → ReSelectButtonPressed` 的连线。
+			//   那条连线替换字段是拦不住的，它跑完会 `DeleteAllPacket()` +
+			//   开关式的 `PacketListChoose()`，把重复的本卡塌成 1 张。
+			//   所以按下后盯几帧，一旦发现卡槽与期望不符就按存档顺序重建。
+			_reselectDesired = desired;
+			_reselectDesiredMine = mine;
+			_reselectWatch = 6;
+			_reselectAttempts = 0;
+
+			if (!_reselectLogged)
+			{
+				_reselectLogged = true;
+				Log("「重选」接管生效：存档 " + desired.Count + " 项 → 入槽，其中本卡 "
+					+ gotMine + " 张（存档记忆 " + mine + " 张），顺序与存档一致。");
+			}
+		}
+		catch (Exception ex)
+		{
+			if (!_reselectErrLogged)
+			{
+				_reselectErrLogged = true;
+				Log("「重选」接管异常，回退原生处理器（本条只报一次）：" + ex.Message);
+			}
+			CallOriginalReselect();
+		}
+	}
+
+	/// <summary>
+	/// 按 <paramref name="keys"/> 的顺序**清空并重建**卡槽，返回重建后卡槽里本卡的张数。
+	///
+	/// ★ 每张都走游戏的 `TowerDefenseInGamePacketBank.CreateAnime`（= 原生 `PacketChoose`
+	///   加卡那一步调用的同一个方法），而不是自己 `AddPacket`，好处有两个：
+	///     · 它是**唯一**能给出飞入动画的入口，顺带把动画要了回来（之前直接 `AddPacket`
+	///       是凭空出现）；
+	///     · 它会自己调 `seedBank.AddPacket(cfg, IsGameRunning)`，卡片的初始化语义
+	///       与原生完全一致（选卡界面下 `IsGameRunning` 为 false ⇒ 走「可取消」那套）。
+	///   `CreateAnime` 对 `IsInsideTree` / `cfg` / `seedBank` / `animeNode` 都有前置校验，
+	///   校验不过会**静默 return 且不加卡**，所以下面用 `packetList.Count` 有没有涨来判断，
+	///   没涨就退化为直接入槽（自己补 `Visible`，因为少了 Tween 回调那一步）。
+	/// </summary>
+	private int ApplyReselect(TowerDefenseManager mgr, List<string> keys)
+	{
+		TowerDefenseInGameSeedBank seedBank = mgr.GetSeedBank();
+		if (seedBank == null || !GodotObject.IsInstanceValid(seedBank))
+		{
+			return 0;
+		}
+
+		// 动画起点：与 `OnMyPoolCardPressed` 一致 —— 从池子里那张本卡的位置飞出。
+		// 拿不到那张卡时退回原生 `PacketListChoose` 用的「相机位置 + (300, 260)」。
+		TowerDefenseBattleFeaturePacketBank feature = mgr.GetPacketBankFeature();
+		TowerDefenseInGamePacketBank bank = (feature != null && GodotObject.IsInstanceValid(feature))
+			? GetMember(feature, "packetBank") as TowerDefenseInGamePacketBank
+			: null;
+		bool useAnime = bank != null && GodotObject.IsInstanceValid(bank);
+		Vector2 from = Vector2.Zero;
+		if (useAnime)
+		{
 			try
 			{
-				stored = GameSaveManager.Instance.GetKeyValue(ReSlectKey);
+				Vector2 camera = bank.GetCameraPos();
+				TowerDefenseInGamePacketShow src = _myPoolCard;
+				from = (src != null && GodotObject.IsInstanceValid(src))
+					? camera + src.GlobalPosition
+					: camera + new Vector2(300f, 260f);
 			}
 			catch
 			{
-				return;
+				useAnime = false;
 			}
-			Godot.Collections.Array saved = stored.AsGodotArray();
-			if (saved == null)
+		}
+
+		// ① 先把还在飞的动画全部落地，再清空当前已选。
+		//
+		// ★ 顺序很重要：`CreateAnime` 会把新卡 `Visible = false` 挂一个 0.5s 的 Tween，
+		//   完成回调 `CompletePacketAnimation` 才把目标卡设回可见。若我们在动画还没结束时
+		//   就 `DeleteAllPacket()`，那些卡会被 `ReturnPacketToPool()` 回收，而 Tween 回调
+		//   仍持有它们 ⇒ 之后会把**已回收、可能已重新绑定到别的 config** 的卡设成可见。
+		//   `ClearAnimeNode()` 正是原生 `PacketListChoose` 的第一步：把所有 pending 动画
+		//   立即结算（目标卡可见 + 释放动画副本），从而杜绝悬空回调。
+		if (useAnime)
+		{
+			try { bank.ClearAnimeNode(); } catch { }
+		}
+
+		// ② 放「选卡」音效。
+		//
+		// ★ 原生 `PacketListChoose` IL_0000-IL_0016 一进来就放这一声：
+		//     AudioManager.Instance.AudioPlay("PacketPick", AudioManagerEnum.TYPE.SFX,
+		//                                     0.0, true, false)
+		//   我们是**整次重建**，把原生那一趟整个绕过了 ⇒ 不自己放就没有声音。
+		//   原生是每次调用放**一声**（不是每张卡一声），所以这里也只放一次。
+		PlayPacketPickSfx();
+
+		// ③ 清空当前已选（与原生 `ReSelectButtonPressed` 的第一步一致）。
+		seedBank.DeleteAllPacket();
+
+		// ② 按存档顺序逐张重建。
+		foreach (string key in keys)
+		{
+			if (!seedBank.CanAddPacket())
 			{
-				return;
-			}
-			foreach (Variant v in saved)
-			{
-				if (string.Equals(v.AsString(), MyKey, StringComparison.Ordinal))
-				{
-					need++;
-				}
-			}
-			if (need <= 1)
-			{
-				return;   // 只选了一张（或没选）：原生恢复的就是对的
+				break;   // 卡槽满（引擎自己的上限）
 			}
 
-			// ② 卡槽里现在实际有几张本卡
-			int have = 0;
+			TowerDefensePacketConfig cfg = null;
+			try { cfg = TowerDefenseManager.GetPacketConfig(key); } catch { }
+			if (cfg == null || !GodotObject.IsInstanceValid(cfg))
+			{
+				continue;   // 该项取不到配置（卡池变了等），跳过
+			}
+
+			int before = 0;
+			try { before = seedBank.packetList.Count; } catch { }
+
+			if (useAnime)
+			{
+				try { bank.CreateAnime(cfg, from); } catch { }
+			}
+
+			int after = before;
+			try { after = seedBank.packetList.Count; } catch { }
+			if (after <= before)
+			{
+				// 动画入口没生效（`animeNode` 未就绪等，`CreateAnime` 会**静默 return**）
+				// ⇒ 退化为直接入槽。
+				//
+				// ★ `AddPacket` 的第二个参数决定它做哪一套（IL_0094 起的分支）：
+				//     false → 只挂 `DeletePacket`（点一下把这张卡取消），**不**初始化；
+				//     true  → 置 `alive`/`start` + 挂 `PacketPickControl.PickPacket` + `StartInit()`。
+				//   `true` 那套是**关卡运行中**点卡种植用的。这里是选卡界面，语义应对应
+				//   原生选卡路径（`CreateAnime` 传的也是 `IsGameRunning`，选卡时为 false）
+				//   ⇒ 用 `false`，卡片点一下即可取消，和玩家自己选卡后的行为一致。
+				//   但 `false` 分支不碰 `Visible`，所以必须自己把它显出来（`CreateAnime`
+				//   是靠 Tween 结束回调把目标卡设可见的，我们跳过了动画就得自己设）。
+				try
+				{
+					TowerDefenseInGamePacketShow card = seedBank.AddPacket(cfg, false);
+					if (card != null && GodotObject.IsInstanceValid(card))
+					{
+						try { card.Visible = true; } catch { }
+					}
+				}
+				catch (Exception ex)
+				{
+					if (!_reselectErrLogged)
+					{
+						_reselectErrLogged = true;
+						Log("逐张恢复时出错（本条只报一次）：" + ex.Message);
+					}
+				}
+			}
+		}
+
+		// ③ 数**真实入槽**的本卡张数（而不是调用次数）。
+		int gotMine = 0;
+		try
+		{
 			Godot.Collections.Array<TowerDefenseInGamePacketShow> list = seedBank.packetList;
 			if (list != null)
 			{
@@ -738,62 +996,668 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 					TowerDefenseInGamePacketShow c = list[i];
 					if (c != null && GodotObject.IsInstanceValid(c) && IsMyCard(c))
 					{
-						have++;
+						gotMine++;
 					}
 				}
 			}
-			if (have >= need)
-			{
-				return;   // 已经齐了（重复点「重选」时不会越补越多）
-			}
+		}
+		catch { }
+		return gotMine;
+	}
 
-			// ③ 补差额
-			TowerDefensePacketConfig cfg = TowerDefenseManager.GetPacketConfig(MyKey);
-			if (cfg == null || !GodotObject.IsInstanceValid(cfg))
+	/// <summary>
+	/// 按下「重选」之后的几帧里核对卡槽：若被原生那条 Godot 连线覆盖过，就按存档顺序重建。
+	///
+	/// ★ 触发条件刻意收窄成「**本卡张数变少**」而不是「序列不完全一致」：
+	///   玩家按下重选后可能马上又点了几张别的卡，那种情况本卡张数不会减少；
+	///   只有原生覆盖才会把重复的本卡塌成 1 张。用张数判定就不会误伤玩家的新选择。
+	/// </summary>
+	private void DriveReselectReconcile()
+	{
+		if (_reselectDesired == null)
+		{
+			return;
+		}
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
 			{
+				_reselectDesired = null;
+				return;
+			}
+			TowerDefenseInGameSeedBank seedBank = mgr.GetSeedBank();
+			if (seedBank == null || !GodotObject.IsInstanceValid(seedBank))
+			{
+				_reselectDesired = null;
 				return;
 			}
 
-			int added = 0;
-			for (int i = have; i < need; i++)
+			if (CountMine(seedBank) >= _reselectDesiredMine)
 			{
-				if (!seedBank.CanAddPacket())
+				// 本卡份数够（玩家可能又加了别的卡，不管）⇒ 连续几帧都稳定就收工。
+				_reselectWatch--;
+				if (_reselectWatch <= 0)
 				{
-					break;   // 卡槽已满（引擎自己的上限）
+					_reselectDesired = null;
 				}
-				// 同步入槽：内部会 packetList.Add + EnsurePacketSlots，下一帧立即可见。
-				// 第二个参数 false = "not in combat"（与原生恢复路径一致：
-				// `PacketListChoose` → `CreateAnime` → `AddPacket(cfg, IsGameRunning())`，
-				// 而我们在选卡界面、IsGameRunning() 是 false）。
-				TowerDefenseInGamePacketShow addedCard = seedBank.AddPacket(cfg, false);
-				if (addedCard == null || !GodotObject.IsInstanceValid(addedCard))
-				{
-					break;   // 守卫没过（packetContainer 还没 Ready 等），不再继续
-				}
-				// ★ 关键：AddPacket(cfg, false) 只把卡塞进 packetList 并分配 slot，
-				//   **不会** StartInit()、也**不会**置 alive = true。这两步在原生路径里是
-				//   飞入动画结束时由 CompletePacketAnimation 补的。少了它们，卡片虽然在
-				//   packetList 里、占了槽位，但没初始化 ⇒ 表现就是「补了却还是只能选一张」。
-				try { addedCard.StartInit(); } catch { }
-				try { addedCard.alive = true; } catch { }
-				added++;
+				return;
 			}
 
-			if (added > 0)
+			if (_reselectAttempts >= 4)
 			{
-				Log("「重选」补齐：" + MyKey + " 记忆 " + need + " 张、原生恢复 " + have
-					+ " 张、补上 " + added + " 张"
-					+ ((added < need - have) ? "（未满额：卡槽上限）" : "") + "。");
+				_reselectDesired = null;   // 重建多次仍不符，放弃（避免死循环）
+				return;
+			}
+
+			int gotMine = ApplyReselect(mgr, _reselectDesired);
+			_reselectAttempts++;
+			_reselectWatch = 3;
+
+			if (!_reselectRebuildLogged)
+			{
+				_reselectRebuildLogged = true;
+				Log("「重选」结果被原生路径覆盖，已按存档顺序重建（本卡 " + gotMine + " 张）。");
+			}
+			if (gotMine <= 0)
+			{
+				_reselectDesired = null;
 			}
 		}
 		catch (Exception ex)
 		{
-			if (!_reselectErrLogged)
+			_reselectDesired = null;
+			Swallow("重选结果核对", ex);
+		}
+	}
+
+	/// <summary>数当前卡槽里本卡的张数。</summary>
+	private static int CountMine(TowerDefenseInGameSeedBank seedBank)
+	{
+		int n = 0;
+		try
+		{
+			Godot.Collections.Array<TowerDefenseInGamePacketShow> list = seedBank.packetList;
+			if (list != null)
 			{
-				_reselectErrLogged = true;
-				Log("「重选」补齐异常（本条只报一次）：" + ex.Message);
+				for (int i = 0; i < list.Count; i++)
+				{
+					TowerDefenseInGamePacketShow c = list[i];
+					if (c != null && GodotObject.IsInstanceValid(c) && IsMyCard(c))
+					{
+						n++;
+					}
+				}
 			}
 		}
+		catch { }
+		return n;
+	}
+
+	/// <summary>
+	/// 放一声原生「选卡」音效（`PacketPick`），与 `PacketListChoose` 开头那一声一致。
+	///
+	/// ★ 走反射而不是直接 `AudioManager.Instance.AudioPlay(...)`，有两个原因：
+	///   1. `AudioPlay` 的第二个参数类型是嵌套枚举 `AudioManagerEnum.TYPE`（值 SFX = 1）。
+	///      用反射就不需要在编译期引用这个嵌套类型，少一层对游戏内部结构的耦合；
+	///   2. 万一某个版本改了签名 / 改了枚举值，反射失败只会**没声音**，
+	///      不会抛异常影响「重选」本身（音效是锦上添花，绝不能拖垮主流程）。
+	/// </summary>
+	private void PlayPacketPickSfx()
+	{
+		try
+		{
+			Type amType = null;
+			foreach (System.Reflection.Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+			{
+				try
+				{
+					amType = asm.GetType("AudioManager", false);
+					if (amType != null)
+					{
+						break;
+					}
+				}
+				catch { }
+			}
+			if (amType == null)
+			{
+				return;
+			}
+
+			object inst = null;
+			PropertyInfo ip = amType.GetProperty("Instance",
+				BindingFlags.Public | BindingFlags.Static);
+			if (ip != null)
+			{
+				inst = ip.GetValue(null);
+			}
+			if (inst == null)
+			{
+				FieldInfo iff = amType.GetField("Instance",
+					BindingFlags.Public | BindingFlags.Static);
+				if (iff != null)
+				{
+					inst = iff.GetValue(null);
+				}
+			}
+			if (inst == null)
+			{
+				return;   // 音频系统还没起来
+			}
+
+			MethodInfo play = null;
+			foreach (MethodInfo m in amType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+			{
+				if (m.Name != "AudioPlay")
+				{
+					continue;
+				}
+				ParameterInfo[] ps = m.GetParameters();
+				// (string, TYPE, double, bool, bool)
+				if (ps.Length == 5 && ps[0].ParameterType == typeof(string)
+					&& ps[1].ParameterType.IsEnum && ps[2].ParameterType == typeof(double)
+					&& ps[3].ParameterType == typeof(bool) && ps[4].ParameterType == typeof(bool))
+				{
+					play = m;
+					break;
+				}
+			}
+			if (play == null)
+			{
+				return;
+			}
+
+			ParameterInfo[] prm = play.GetParameters();
+			object sfx = Enum.ToObject(prm[1].ParameterType, 1);   // TYPE.SFX = 1
+			play.Invoke(inst, new object[] { "PacketPick", sfx, 0.0d, true, false });
+		}
+		catch (Exception ex)
+		{
+			Swallow("播放选卡音效", ex);
+		}
+	}
+
+	// ================================================================ 选卡分组（接管读取）
+
+	/// <summary>
+	/// 每帧看一眼 6 个「选卡分组」按钮，把每个的 `OnLoadGroup` **整体替换**成我们的处理器。
+	///
+	/// ★ 原生 `LoadPacketGroup(id)` IL_008a-IL_00a1 与「重选上次卡牌」是**同一条**路径：
+	///     seedBank.DeleteAllPacket();  PacketListChoose(存档);
+	///   而 `PacketListChoose` 用按 saveKey 去重的 `packetNameSet` 判「已有」⇒
+	///   分组里存了 5 张本卡，读回来只进 1 张。
+	///
+	/// ★ 保存侧**不动**：`SavePacketGroup(id)` 直接遍历 `packetList` 逐张写 key，
+	///   本来就能正确保存重复卡。
+	///
+	/// ★ 按钮的取法与游戏自己一致（`_ConnectPacketBankSignals` IL_0191-IL_01ea）：
+	///     packetBank.translate.GetNode("PacketGroup")           ← 容器
+	///     → GetNode("PacketGroupButton")                         ← id = 1（没有数字后缀）
+	///     → GetNode("PacketGroupButton" + i)  for i = 2..6
+	///   即 1 号是 `PacketGroupButton`，2~6 号带数字后缀。
+	/// </summary>
+	private void DriveGroupHook()
+	{
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return;
+			}
+			TowerDefenseBattleFeaturePacketBank feature = mgr.GetPacketBankFeature();
+			if (feature == null || !GodotObject.IsInstanceValid(feature))
+			{
+				return;   // 不在选卡界面
+			}
+			MethodInfo handler = typeof(RandomImitaterEntry).GetMethod(
+				nameof(OnGroupLoadPressed),
+				BindingFlags.NonPublic | BindingFlags.Instance);
+			if (handler == null)
+			{
+				return;
+			}
+
+			for (int id = 1; id <= GroupCount; id++)
+			{
+				Node btn = FindGroupButton(feature, id);
+				if (btn == null || !GodotObject.IsInstanceValid(btn))
+				{
+					continue;
+				}
+				// 读**活委托**判断，不按实例 ID 记账：游戏可能重建按钮并重新挂处理器。
+				Delegate curD = GetEventField(btn, "OnLoadGroup") as Delegate;
+				if (curD != null)
+				{
+					Delegate[] inv = curD.GetInvocationList();
+					if (inv.Length == 1 && inv[0].Target == this
+						&& inv[0].Method.Name == nameof(OnGroupLoadPressed))
+					{
+						continue;   // 已经是「只有我们」的状态
+					}
+				}
+				Delegate kept = StripMine(curD, nameof(OnGroupLoadPressed));
+				if (!ReplaceEventField(btn, "OnLoadGroup", handler))
+				{
+					continue;
+				}
+				_groupOriginal[btn.GetInstanceId()] = kept;
+				if (!_groupLogged)
+				{
+					_groupLogged = true;
+					Log("已接管「读取选卡分组」按钮（6 个分组，多张本卡按存档顺序精确恢复）。");
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			if (!_groupErrLogged)
+			{
+				_groupErrLogged = true;
+				Log("接管「选卡分组」按钮失败（已吞）：" + ex.Message);
+			}
+		}
+	}
+
+	/// <summary>
+	/// 找第 <paramref name="id"/> 个分组按钮（1..6）。
+	/// 与游戏 `_ConnectPacketBankSignals` IL_0191-IL_01ea 的取法一致：
+	/// 容器是 `packetBank.translate/PacketGroup`，1 号叫 `PacketGroupButton`，
+	/// 2..6 号叫 `PacketGroupButton2` … `PacketGroupButton6`。
+	/// </summary>
+	private static Node FindGroupButton(TowerDefenseBattleFeaturePacketBank feature, int id)
+	{
+		try
+		{
+			object bank = GetMember(feature, "packetBank");
+			if (bank == null || !GodotObject.IsInstanceValid((GodotObject)bank))
+			{
+				return null;
+			}
+			object translate = GetMember(bank, "translate");
+			Control tr = translate as Control;
+			if (tr == null || !GodotObject.IsInstanceValid(tr))
+			{
+				return null;
+			}
+			Node group = tr.GetNodeOrNull("PacketGroup");
+			if (group == null || !GodotObject.IsInstanceValid(group))
+			{
+				return null;
+			}
+			string name = (id <= 1) ? "PacketGroupButton" : ("PacketGroupButton" + id);
+			return group.GetNodeOrNull(name);
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	/// <summary>
+	/// 某个分组被「读取」：我们自己按存档顺序整次重建（份数与顺序都对）。
+	/// 判据与收窄：只有存档里本卡 ≥2 张时才走自定义路径；否则原样调用原生处理器。
+	/// 任何异常都退回原生处理器 ⇒ 最坏情况 = 原生行为，按钮不会失灵。
+	/// </summary>
+	private void OnGroupLoadPressed(int id)
+	{
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				CallOriginalGroupLoad(id);
+				return;
+			}
+
+			Godot.Collections.Array saved = ReadGroupSave(mgr, id);
+			int mine = 0;
+			if (saved != null)
+			{
+				foreach (Variant v in saved)
+				{
+					if (string.Equals(v.AsString(), MyKey, StringComparison.Ordinal))
+					{
+						mine++;
+					}
+				}
+			}
+			if (mine <= 1)
+			{
+				// 本卡只有 0~1 张：原生的结果就是对的，完全交给原生。
+				CallOriginalGroupLoad(id);
+				return;
+			}
+
+			// 与「重选」同一套：期望状态 = 存档里配置仍有效的 key（保持顺序）。
+			List<string> desired = new List<string>();
+			if (saved != null)
+			{
+				foreach (Variant v in saved)
+				{
+					string key = v.AsString();
+					if (string.IsNullOrEmpty(key))
+					{
+						continue;
+					}
+					TowerDefensePacketConfig cfg = null;
+					try { cfg = TowerDefenseManager.GetPacketConfig(key); } catch { }
+					if (cfg == null || !GodotObject.IsInstanceValid(cfg))
+					{
+						continue;
+					}
+					desired.Add(key);
+				}
+			}
+			if (desired.Count == 0)
+			{
+				CallOriginalGroupLoad(id);
+				return;
+			}
+
+			int gotMine = ApplyReselect(mgr, desired);
+			if (gotMine < mine)
+			{
+				Log("「读取分组 " + id + "」接管结果不符（本卡 " + gotMine + "/" + mine + "），回退原生处理器。");
+				CallOriginalGroupLoad(id);
+				return;
+			}
+
+			// 与「重选」同理：按下后仍可能被另一条原生路径覆盖，盯几帧核对。
+			_reselectDesired = desired;
+			_reselectDesiredMine = mine;
+			_reselectWatch = 6;
+			_reselectAttempts = 0;
+
+			if (!_groupLogged2)
+			{
+				_groupLogged2 = true;
+				Log("「读取分组」接管生效：分组 " + id + "，存档 " + desired.Count
+					+ " 项 → 入槽，其中本卡 " + gotMine + " 张（存档记忆 " + mine + " 张）。");
+			}
+		}
+		catch (Exception ex)
+		{
+			if (!_groupErrLogged)
+			{
+				_groupErrLogged = true;
+				Log("「读取分组」接管异常，回退原生处理器（本条只报一次）：" + ex.Message);
+			}
+			CallOriginalGroupLoad(id);
+		}
+	}
+
+	/// <summary>读第 <paramref name="id"/> 个分组的存档数组（按模式选前缀，与原生一致）。</summary>
+	private Godot.Collections.Array ReadGroupSave(TowerDefenseManager mgr, int id)
+	{
+		try
+		{
+			if (GameSaveManager.Instance == null
+				|| !GodotObject.IsInstanceValid(GameSaveManager.Instance))
+			{
+				return null;
+			}
+			string prefix = GroupKeyPrefix;
+			try
+			{
+				if (mgr != null && GodotObject.IsInstanceValid(mgr)
+					&& (mgr.IsIZMMode() || mgr.IsIZM2Mode()))
+				{
+					prefix = GroupKeyPrefixIzm;
+				}
+			}
+			catch { }
+
+			// 先按模式定的前缀取，取不到再退回另一个前缀（保证「至少能用」）。
+			foreach (string p in new[] { prefix, prefix == GroupKeyPrefix ? GroupKeyPrefixIzm : GroupKeyPrefix })
+			{
+				try
+				{
+					Variant v = GameSaveManager.Instance.GetKeyValue(p + id);
+					Godot.Collections.Array a = v.AsGodotArray();
+					if (a != null && a.Count > 0)
+					{
+						return a;
+					}
+				}
+				catch { }
+			}
+		}
+		catch { }
+		return null;
+	}
+
+	/// <summary>调用第 <paramref name="id"/> 个分组按钮被我们换下来的原生 `OnLoadGroup`（兜底）。</summary>
+	private void CallOriginalGroupLoad(int id)
+	{
+		// ① 有底稿就直接调（原生行为，逐字一致）。
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr != null && GodotObject.IsInstanceValid(mgr))
+			{
+				TowerDefenseBattleFeaturePacketBank feature = mgr.GetPacketBankFeature();
+				if (feature != null && GodotObject.IsInstanceValid(feature))
+				{
+					Node btn = FindGroupButton(feature, id);
+					if (btn != null && GodotObject.IsInstanceValid(btn))
+					{
+						Delegate d;
+						if (_groupOriginal.TryGetValue(btn.GetInstanceId(), out d) && d != null)
+						{
+							d.DynamicInvoke(new object[] { id });
+							return;
+						}
+					}
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			Swallow("调用原生「读取分组」底稿", ex);
+		}
+
+		// ② 没底稿 / 底稿失效：直接调游戏自己的 LoadPacketGroup(id)（同样是原生行为）。
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return;
+			}
+			TowerDefenseBattleFeaturePacketBank feature = mgr.GetPacketBankFeature();
+			if (feature == null || !GodotObject.IsInstanceValid(feature))
+			{
+				return;
+			}
+			MethodInfo m = null;
+			for (Type t = feature.GetType(); t != null && m == null; t = t.BaseType)
+			{
+				m = t.GetMethod("LoadPacketGroup",
+					BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+					null, new[] { typeof(int) }, null);
+			}
+			if (m != null)
+			{
+				m.Invoke(feature, new object[] { id });
+			}
+		}
+		catch (Exception ex)
+		{
+			Swallow("兜底调用原生「读取分组」", ex);
+		}
+	}
+
+	/// <summary>
+	/// 从多播委托里剥掉**我们自己**的处理器，返回剩下的部分（= 原生处理器）。
+	/// 用于把按钮字段收敛成「只有我们」，同时保住原生委托作兜底。
+	/// </summary>
+	private Delegate StripMine(Delegate d, string handlerName)
+	{
+		if (d == null)
+		{
+			return null;
+		}
+		try
+		{
+			Delegate keep = null;
+			foreach (Delegate one in d.GetInvocationList())
+			{
+				bool mine = (one.Target == this && one.Method.Name == handlerName);
+				if (!mine)
+				{
+					keep = Delegate.Combine(keep, one);
+				}
+			}
+			return keep;
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	/// <summary>调用被我们替换下来的原生「重选」处理器（兜底）。</summary>
+	private void CallOriginalReselect()
+	{
+		Delegate d = _reselectOriginal;
+		if (d != null)
+		{
+			try
+			{
+				d.DynamicInvoke(new object[0]);
+				return;
+			}
+			catch (Exception ex)
+			{
+				// ★ 底稿可能是**上一个场景**留下的、目标已被释放的委托（换关 / 重进选卡界面），
+				//   这时 DynamicInvoke 会抛。绝不能就此收手 —— 下面还有复刻版兜底。
+				Swallow("调用原生「重选」底稿", ex);
+			}
+		}
+		// ★ 没有底稿（我们比原生先挂上 / 原生这次还没连 / 底稿已失效）时，
+		//   若直接 return，按钮会**彻底失灵** —— 绝不能这样。
+		//   这里自己复刻一遍原生行为：`DeleteAllPacket()` + `PacketListChoose(存档)`，
+		//   与 `ReSelectButtonPressed` 的 IL 完全一致。
+		NativeReselectFallback();
+	}
+
+	/// <summary>
+	/// 复刻原生 `ReSelectButtonPressed` 作为最后兜底。
+	///
+	/// ★ 优先直接调用游戏自己的 `ReSelectButtonPressed()` —— 那是**逐字**的原生行为，
+	///   连「按模式选哪个存档键」这种细节都不会走样。只有连它也调不到时，
+	///   才退到下面手工复刻（读存档 → `DeleteAllPacket()` → `PacketListChoose(存档)`）。
+	/// </summary>
+	private void NativeReselectFallback()
+	{
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return;
+			}
+			TowerDefenseBattleFeaturePacketBank feature = mgr.GetPacketBankFeature();
+			if (feature == null || !GodotObject.IsInstanceValid(feature))
+			{
+				return;
+			}
+
+			// ① 最好：直接调游戏的原生方法（它自己会按 IZM / 普通模式选存档键）。
+			MethodInfo native = null;
+			for (Type t = feature.GetType(); t != null && native == null; t = t.BaseType)
+			{
+				native = t.GetMethod("ReSelectButtonPressed",
+					BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+					null, Type.EmptyTypes, null);
+			}
+			if (native != null)
+			{
+				native.Invoke(feature, null);
+				return;
+			}
+
+			// ② 退路：手工复刻。
+			Godot.Collections.Array saved = ReadReselectSave();
+			if (saved == null || saved.Count == 0)
+			{
+				return;
+			}
+			TowerDefenseInGameSeedBank seedBank = mgr.GetSeedBank();
+			if (seedBank != null && GodotObject.IsInstanceValid(seedBank))
+			{
+				seedBank.DeleteAllPacket();
+			}
+			MethodInfo plc = null;
+			for (Type t = feature.GetType(); t != null && plc == null; t = t.BaseType)
+			{
+				plc = t.GetMethod("PacketListChoose",
+					BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+			}
+			if (plc == null)
+			{
+				return;
+			}
+			plc.Invoke(feature, new object[] { saved });
+		}
+		catch (Exception ex)
+		{
+			Swallow("复刻原生「重选」", ex);
+		}
+	}
+
+	/// <summary>
+	/// 读存档里「上次卡牌选择」的数组。
+	///
+	/// ★ 键的选择必须跟游戏**完全一致**，而不是「取第一个非空的」：
+	///   `ReSelectButtonPressed` IL_0000-IL_0049 是按模式二选一 ——
+	///     `IsIZMMode() || IsIZM2Mode()` 为真 → `ZombiePacketReSlect`；
+	///     否则                              → `PacketReSlect`。
+	///   两个键可能**同时**有内容（先玩普通关、再玩 IZM 就会这样）。
+	///   若按「第一个非空」取，在 IZM 关里会读到普通模式那份存档，
+	///   恢复出来的卡与原生完全不同 ⇒ 玩家会看到莫名其妙的卡组。
+	/// </summary>
+	private Godot.Collections.Array ReadReselectSave()
+	{
+		try
+		{
+			if (GameSaveManager.Instance == null
+				|| !GodotObject.IsInstanceValid(GameSaveManager.Instance))
+			{
+				return null;
+			}
+
+			// 先按模式定键（与原生一致），取不到再退回另一个键，保证「至少能用」。
+			string primary = ReSlectKey;
+			try
+			{
+				TowerDefenseManager mgr = TowerDefenseManager.Instance;
+				if (mgr != null && GodotObject.IsInstanceValid(mgr)
+					&& (mgr.IsIZMMode() || mgr.IsIZM2Mode()))
+				{
+					primary = ReSlectKeyIzm;
+				}
+			}
+			catch { }
+
+			foreach (string k in new[] { primary, primary == ReSlectKey ? ReSlectKeyIzm : ReSlectKey })
+			{
+				try
+				{
+					Variant v = GameSaveManager.Instance.GetKeyValue(k);
+					Godot.Collections.Array a = v.AsGodotArray();
+					if (a != null && a.Count > 0)
+					{
+						return a;
+					}
+				}
+				catch { }
+			}
+		}
+		catch { }
+		return null;
 	}
 
 	// ================================================================ 注册混合卡池

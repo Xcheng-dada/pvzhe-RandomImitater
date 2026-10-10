@@ -37,6 +37,8 @@ DOTNET_ROOT = os.path.dirname(DOTNET)
 CHAR_KEY = "RandomImitater"
 MOD_NAME = "随机模仿者"
 MOD_ID = "randomimitater"
+# 版本号单一来源：改这里就够了（mod.json 与 README 都以此为准）。
+MOD_VERSION = "1.1.0"
 CFG_FILE = "TowerDefensePlantRandomImitater.tres"
 SCENE_FILE = "RandomImitater.tscn"
 SPRITE_FILE = "RandomImitater.tscn"
@@ -238,7 +240,7 @@ def manifest():
         "schemaVersion": 2,
         "id": MOD_ID,
         "name": MOD_NAME,
-        "version": "1.0.0",
+        "version": MOD_VERSION,
         "author": "小橙c",
         "description": (
             f"新增植物「{PN}」（彩卡）：种下后随机开出植物或僵尸"

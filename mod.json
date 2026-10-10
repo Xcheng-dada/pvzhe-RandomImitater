@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "randomimitater",
   "name": "随机模仿者",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "小橙c",
   "description": "新增植物「随机模仿者」（彩卡）：种下后随机开出植物或僵尸（65% 开出随机植物，35% 开出随机僵尸·敌对）。",
   "dependencies": [],
