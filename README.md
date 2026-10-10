@@ -8,7 +8,7 @@
 | Mod ID | `randomimitater` |
 | 当前版本 | 1.1.0 |
 | 作者 | 小橙c |
-| 适用游戏版本 | **0.29.0**（Windows；其它版本未测试） |
+| 适用游戏版本 | **0.29.0 / 0.30.0**（Windows，均已测试；其它版本未测试） |
 | 分类 | 植物 · 彩卡 |
 | 前置依赖 | 无（不需要额外安装 .NET 或任何运行库） |
 | 维护状态 | 作者自行维护中 |
@@ -86,8 +86,11 @@
 出现这一行就说明成功：
 
 ```
-[RandomImitater] 已注册卡池 RandomImitaterMixed：植物 325 张 + 僵尸 290 只；……
+[RandomImitater] 已注册卡池 RandomImitaterMixed：植物 xxx 张 + 僵尸 xxx 只；……
 ```
+
+> 具体数字随游戏版本变化（0.30.0 下是植物 335 张 + 僵尸 302 只），
+> 只要出现这一行就说明卡池注册成功。
 
 > 如果看到 `package rolled back`，说明加载失败。
 
@@ -102,7 +105,7 @@
 
 **Q：装了但游戏里看不到这张卡？**
 
-A：确认游戏版本是 0.29.0；确认 `enabled_mods.json` 里有 `"randomimitater"`；把
+A：确认游戏版本是 0.29.0 或 0.30.0；确认 `enabled_mods.json` 里有 `"randomimitater"`；把
 `%APPDATA%\Godot\app_userdata\植物大战僵尸杂交版\ModsCache\RandomImitater` 这个文件夹
 删掉再重启游戏。
 
@@ -132,7 +135,7 @@ A：不用，全程都不花阳光。开出的植物直接就是你的。
 ## 兼容性与已知限制
 
 - **平台**：Windows。Android 未测试。
-- **游戏版本**：0.29.0
+- **游戏版本**：0.29.0、0.30.0（均已测试正常）
 
 ## 授权与维护
 
