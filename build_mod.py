@@ -73,7 +73,7 @@ CHAR_KEY = "RandomImitater"
 MOD_NAME = "随机模仿者"
 MOD_ID = "randomimitater"
 # 版本号单一来源：改这里就够了（mod.json 与 README 都以此为准）。
-MOD_VERSION = "1.5.2"
+MOD_VERSION = "1.6.0"
 CFG_FILE = "TowerDefensePlantRandomImitater.tres"
 SCENE_FILE = "RandomImitater.tscn"
 SPRITE_FILE = "RandomImitater.tscn"
@@ -103,6 +103,7 @@ PD = "完全随机的模仿者，惊喜和惊吓并存！"
 # 图鉴·描述：走内置卡的「字段块」格式
 # ⚠️ 这里的百分比要和 src/RandomImitaterEntry.cs 的 PlantChance 保持一致（现在是 0.65）。
 PHD = ("[color=FF0000]获取方式[/color]：[color=0000cd]Mod 植物（无需解锁）[/color]\\n"
+       "[color=0048FF]臻享钻卡：该植物价格通常固定，不受常规机制影响[/color]\\n"
        "韧性：[color=cc241d]1000[/color]\\n"
        "特点：[color=cc241d]65%概率开出随机植物 35%概率开出随机僵尸（敌对）[/color]\\n")
 
@@ -122,9 +123,10 @@ PHS = ("随机模仿者旋转着，宛如风暴般裹挟着植物与僵尸，随
 #    ⇒ AutowrapMode = WordSmart，会自动换行，所以直接写 \n 分行即可。
 #
 # 刻意**不写卡池数量**（如 335 张 / 302 只）：那个数随游戏版本变，写死会在本体更新后变错。
-PI = ("在选卡界面「Mod 植物」页签选中它，无需解锁。\n"
+PI = ("在选卡界面「Mod 植物」或「钻卡」页签选中它，无需解锁。\n"
       "种下后随机开出植物（默认 65%）或敌对僵尸（默认 35%）。\n"
       "默认 0 阳光、冷却 7.5 秒、本体 1000 血。\n"
+      "本卡是钻卡：价格固定，不受市场僵尸等常规改价机制影响。\n"
       "属性与显示配置可在游戏内「Mod 管理 → 配置」里实时调整，保存即生效。")
 
 
@@ -138,7 +140,22 @@ S_CSET = "res://Script/Component/Runtime/CharacterComponentSet.cs"
 S_PACKET = "res://Registry/Battle/Feature/PacketBank/Resource/Packet/TowerDefensePacketConfig.cs"
 
 # PACKET_TYPE: NOONE=-1, WHITE=0, GOLD=1, DIAMOND=2, COLOUR=3, STAR=4, ORIGINAL=5, ZOMBIE=6
-PACKET_TYPE_COLOUR = 3
+#
+# 本卡取 DIAMOND（钻卡）。依据是 IL 与游戏文案两条独立证据：
+#   · TowerDefensePacketChangeCost.ModifyCost 按 amontDictionary[packet.type] 查表改价
+#     （IL_0047 取 type → IL_0054 ContainsKey → IL_005e 不中即 ret），
+#     所以**没登记进表的卡类完全不受改价影响**。市场僵尸（ZombieMerchant）的图鉴
+#     写明「在场时使所有白卡价格增加25，所有金/彩/星/紫卡价格增加50」，其中没有钻卡。
+#   · 游戏每张钻卡的 handbookDescribe 都带一句
+#     「[color=0048FF]臻享钻卡：该植物价格通常固定，不受常规机制影响[/color]」。
+#   · 同一张表还被 TowerDefenseSunQX（把卡槽其他卡变金色卡背）、Cardless、
+#     CoffeebeanSale 使用，故钻卡一并免疫它们的改价。
+#   · 卡面边框由 TowerDefenseInGamePacketShow.UpdateBackgroundTexture 按 type 分支，
+#     DIAMOND → PACKET_DIAMOND（PC 与移动各一套）。
+# 注意：type **不决定选卡页签**。页签是 TowerDefensePacketBankData.category 字典的键，
+#   而 Mod 卡被 XWModContentCatalog.WithPlants 硬编码塞进 "ModPlants"（IL_0067）。
+#   要同时出现在「钻卡」页签需运行时注入，见 src/RandomImitaterEntry.cs。
+PACKET_TYPE_DIAMOND = 2
 
 out = []
 
@@ -272,7 +289,7 @@ packetAnimeClip = "Idle"
 packetAnimeOffset = Vector2(21, 25)
 packetAnimeScale = Vector2(0.5, 0.5)
 characterConfig = ExtResource("1")
-type = {PACKET_TYPE_COLOUR}
+type = {PACKET_TYPE_DIAMOND}
 metadata/_custom_type_script = "{S_PACKET}"
 """
 
@@ -294,7 +311,7 @@ def manifest():
         "version": MOD_VERSION,
         "author": "小橙c",
         "description": (
-            f"新增植物「{PN}」（彩卡）：种下后随机开出植物或僵尸"
+            f"新增植物「{PN}」（钻卡）：种下后随机开出植物或僵尸"
             f"（默认 65% 开出随机植物，35% 开出随机僵尸·敌对）。"
             f"属性与显示配置可在游戏内「Mod 管理 → 配置」实时调整。"
         ),

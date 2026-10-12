@@ -90,6 +90,17 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	private const string ZombieCat = "Zombie";
 
 	/// <summary>
+	/// 选卡界面「钻卡」页签的分类键。
+	///
+	/// 键名取自游戏选卡场景里预置的页签按钮（<c>PacketCategoryButton.category</c>，
+	/// 其显示文字为「钻卡」）。游戏全部页签键为：
+	///   White（白卡，用字段默认值故无显式赋值）、Gold（金卡）、Diamond（钻卡）、
+	///   Colour（彩卡）、Star（星卡）、Original（原卡）、Item（物品卡）、
+	///   GraveStone（障碍物）、Zombie（僵尸卡）、ModPlants（Mod 植物）。
+	/// </summary>
+	private const string DiamondCategory = "Diamond";
+
+	/// <summary>
 	/// 混合抽取列表的长度上限。
 	///
 	/// 列表越长，a/b 能凑出的比例越精细 —— 植物 325 / 僵尸 290 时，
@@ -243,6 +254,20 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	/// 的方框内都算点中。行号另外单独严格比对，所以放大这个值也不会跨行误触。
 	/// </summary>
 	private const float MowerClickCellTolerance = 1.0f;
+
+	// ─────────────── 钻卡页签注入状态 ───────────────
+
+	/// <summary>
+	/// 最近一次处理过的分类表对象实例 id（<c>packetBankData.GetInstanceId()</c>）。
+	/// 换关时游戏会把它整体换成 WithPlants 的深拷贝 ⇒ id 变 ⇒ 重新注入一次。
+	/// </summary>
+	private ulong _diamondInjectedFor;
+
+	/// <summary>注入成功是否已记过一次日志。</summary>
+	private bool _diamondLogged;
+
+	/// <summary>注入异常是否已提示过（只提示一次，避免刷屏）。</summary>
+	private bool _diamondErrLogged;
 
 	/// <summary>按卡实例 ID 记录已接管的卡池卡（仅用于日志去重）。</summary>
 	private readonly HashSet<ulong> _hooked = new HashSet<ulong>();
@@ -485,6 +510,8 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			{
 				DriveGroupHook();
 			}
+			// 把本卡追加进「钻卡」页签的分类表（详见 DriveDiamondTab 注释）。
+			DriveDiamondTab();
 			// 右键手动放行小推车（内部自带「游戏进行中 + 点中推车」双重门槛）。
 			DriveMowerRightClick();
 			// 场上有模仿者时，逐帧把「免咬」开关按回可被咬的取值
@@ -2520,6 +2547,119 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 		catch
 		{
 			// 诊断本身失败不影响玩法。
+		}
+	}
+
+	// ================================================================ 钻卡页签注入
+
+	/// <summary>
+	/// 把本卡追加进「钻卡」页签的分类表，让它同时出现在「Mod 植物」和「钻卡」两处。
+	///
+	/// 为什么要运行时注入，而不是靠 <c>type = DIAMOND</c> 自动生效：
+	///   页签归属与 <c>type</c> 是两套独立机制。
+	///     · <c>type</c> 只管卡面边框（<c>UpdateBackgroundTexture</c> 的分支）与
+	///       改价免疫（<c>TowerDefensePacketChangeCost.ModifyCost</c> 按
+	///       <c>amontDictionary[packet.type]</c> 查表，IL_0054 ContainsKey 不中即 ret）。
+	///     · 页签是 <c>TowerDefensePacketBankData.category</c>（public
+	///       <c>Godot.Collections.Dictionary</c>）的键，选卡界面用
+	///       <c>GetCategory(string)</c> 纯按键查表（IL_000c ContainsKey → IL_001f get_Item）。
+	///   而 Mod 卡被游戏硬编码塞进 <c>"ModPlants"</c> 这一个键 ——
+	///   <c>XWModContentCatalog.WithPlants</c> IL_0062-IL_0077：
+	///     <c>category["ModPlants"] = 本 Mod 提供的全部 Packet</c>。
+	///   清单里没有任何字段能改这个键名，所以只能运行时往 <c>"Diamond"</c> 追加。
+	///
+	/// 注入目标必须是 <c>feature.packetBankData</c>（public 字段），不是
+	/// <c>TowerDefenseManager.GetPacketBankData(name)</c> 的返回值：后者虽然返回注册表里的
+	/// 共享实例（IL_0135 直接 ret，无 Duplicate），但 <c>SetPacketBankData</c> 在
+	/// <c>packetBankType == "GeneralPlant"</c> 时会走 <c>WithPlants</c>，而
+	/// <c>WithPlants</c> 开头就 <c>category.Duplicate(true)</c> 造了**新副本**再赋值给
+	/// <c>packetBankData</c>（IL_0007-IL_0012）。改注册表那份会被这次深拷贝丢掉，
+	/// 所以只能改 feature 上正在用的这一份。
+	///
+	/// 安全性（逐条核对过 IL）：
+	///   · <c>RebuildPacketAvailabilityIndex</c> 遍历 <c>category.Values</c> 全部数组塞进
+	///     HashSet ⇒ 同一个 key 出现在两个分类里，集合内容不变，无需重建索引。
+	///   · <c>GetUnlockPacket</c> 也遍历所有分类，但只对 <c>Unlock()</c> 为 true 的卡追加；
+	///     本卡 <c>unlockCheckList = []</c>，<c>Unlock</c> 在 IL_005b-IL_0062 直接
+	///     <c>ldc.i4.0; ret</c> ⇒ 不会被重复计入「已解锁卡」列表。
+	///   · 页签按钮 <c>CardMod</c> 的可见性读的是 <c>category.ContainsKey("ModPlants")</c>
+	///     （<c>SetPacketBankData</c> IL_009b-IL_00af），我们只追加、不移除 ⇒ 不受影响。
+	///   · 「钻卡」页签的按钮本身在选卡场景里预置（<c>category = "Diamond"</c>），
+	///     关卡若没有该键，<c>GetCategory</c> 返回空数组 ⇒ 这里用 ContainsKey 兜住，
+	///     没有该分类就什么都不做，绝不新建键（免得凭空多出一个空页签）。
+	///
+	/// 幂等：每次先 <c>Contains</c> 判断，绝不重复追加。
+	/// 换关判定用 <b>packetBankData 自己的实例 id</b>（就是被我们改的那个对象）：
+	///   <c>SetPacketBankData</c> 会把 <c>packetBankData</c> 整体重新赋值成
+	///   <c>WithPlants</c> 的深拷贝，实例 id 必然变 ⇒ 新对象会再注入一次。
+	///   若改用 feature 的实例 id，同一关内二次初始化会被误判成「已注入」而漏掉。
+	/// </summary>
+	private void DriveDiamondTab()
+	{
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return;
+			}
+			TowerDefenseBattleFeaturePacketBank feature = mgr.GetPacketBankFeature();
+			if (feature == null || !GodotObject.IsInstanceValid(feature))
+			{
+				return;
+			}
+
+			TowerDefensePacketBankData data = feature.packetBankData;
+			if (data == null || !GodotObject.IsInstanceValid(data))
+			{
+				return;   // 还没进选卡界面，下一帧再来
+			}
+			// 这个分类表对象已经处理过 ⇒ 什么都不做（每帧只付两次取实例的代价）。
+			ulong did = data.GetInstanceId();
+			if (did == _diamondInjectedFor)
+			{
+				return;
+			}
+
+			Godot.Collections.Dictionary category = data.category;
+			if (category == null)
+			{
+				return;
+			}
+			// 本关卡池里没有「钻卡」这一类 ⇒ 不动（不新建键，避免凭空多出空页签）。
+			if (!category.ContainsKey(DiamondCategory))
+			{
+				_diamondInjectedFor = did;
+				return;
+			}
+
+			Godot.Collections.Array list = (Godot.Collections.Array)category[DiamondCategory];
+			if (list == null)
+			{
+				_diamondInjectedFor = did;
+				return;
+			}
+			// 用隐式转换而不是 new Variant(...)：GodotSharp 提供的是
+			// op_Implicit(string) -> Variant，构造函数重载是否存在不值得赌。
+			Variant key = MyKey;
+			if (!list.Contains(key))
+			{
+				list.Add(key);
+				if (!_diamondLogged)
+				{
+					_diamondLogged = true;
+					Log("已把本卡追加进「" + DiamondCategory + "」页签（钻卡分类）。");
+				}
+			}
+			_diamondInjectedFor = did;
+		}
+		catch (Exception ex)
+		{
+			if (!_diamondErrLogged)
+			{
+				_diamondErrLogged = true;
+				Log("钻卡页签注入失败（本条只报一次，不影响其它功能）：" + ex.Message);
+			}
 		}
 	}
 
