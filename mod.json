@@ -2,9 +2,10 @@
   "schemaVersion": 2,
   "id": "randomimitater",
   "name": "随机模仿者",
-  "version": "1.1.0",
+  "version": "1.5.2",
   "author": "小橙c",
-  "description": "新增植物「随机模仿者」（彩卡）：种下后随机开出植物或僵尸（65% 开出随机植物，35% 开出随机僵尸·敌对）。",
+  "description": "新增植物「随机模仿者」（彩卡）：种下后随机开出植物或僵尸（默认 65% 开出随机植物，35% 开出随机僵尸·敌对）。属性与显示配置可在游戏内「Mod 管理 → 配置」实时调整。",
+  "playInstructions": "在选卡界面「Mod 植物」页签选中它，无需解锁。\n种下后随机开出植物（默认 65%）或敌对僵尸（默认 35%）。\n默认 0 阳光、冷却 7.5 秒、本体 1000 血。\n属性与显示配置可在游戏内「Mod 管理 → 配置」里实时调整，保存即生效。",
   "dependencies": [],
   "conflicts": [],
   "provides": {
@@ -20,6 +21,44 @@
   },
   "overrides": {},
   "scripts": [],
+  "settings": [
+    {
+      "key": "plantChance",
+      "type": "int",
+      "label": "开出植物的概率",
+      "description": "种下随机模仿者后开出植物的概率。默认 65，即 65% 植物 / 35% 僵尸。0 = 只出僵尸，100 = 只出植物。保存后立即生效。",
+      "group": "属性",
+      "default": 65,
+      "min": 0,
+      "max": 100,
+      "step": 5,
+      "applyMode": "immediate",
+      "affectsGameplay": true
+    },
+    {
+      "key": "sunCost",
+      "type": "int",
+      "label": "阳光消耗",
+      "description": "种下这张卡要的阳光。默认 0，免费种植，最大 1500。保存后立即生效。",
+      "group": "属性",
+      "default": 0,
+      "min": 0,
+      "max": 1500,
+      "step": 25,
+      "applyMode": "immediate",
+      "affectsGameplay": true
+    },
+    {
+      "key": "colorizeResult",
+      "type": "bool",
+      "label": "随机模仿者不变白",
+      "description": "打开时，随机模仿者开出的植物与僵尸不再套用模仿者的黑白滤镜，保持原本配色。关闭则恢复游戏原版的黑白表现。保存后立即生效。",
+      "group": "显示",
+      "default": true,
+      "applyMode": "immediate",
+      "affectsGameplay": false
+    }
+  ],
   "runtimeAssembly": "Runtime/ModAssembly.dll",
   "runtimeEntryType": "RandomImitaterEntry",
   "runtimeApiVersion": 1,

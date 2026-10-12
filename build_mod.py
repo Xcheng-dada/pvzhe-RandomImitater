@@ -16,6 +16,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,7 +27,41 @@ SRC = os.path.join(BASE, "src")
 DIST = os.path.join(BASE, "dist", "RandomImitater.pmod")
 
 # ---------------- 本机路径 ----------------
-GAME = r"F:\桌面\Game\植物大战僵尸杂交版0.29\植物大战僵尸杂交重制版"
+# 游戏安装目录。以前这里写死了「植物大战僵尸杂交版0.29」，游戏升到 0.30 后
+# 旧目录被删掉，构建就报「找不到 PlantsVsZombies.dll」——而且报错点离病因很远，
+# 排查很费劲。所以改成**自动挑版本号最大的那个目录**，升级游戏不用再改脚本。
+#
+# 需要固定到某个版本时，设环境变量覆盖即可：
+#     $env:PVZHE_GAME = "F:\...\植物大战僵尸杂交版0.30\植物大战僵尸杂交重制版"
+_GAME_ROOT = r"F:\桌面\Game"
+_GAME_DIR_PREFIX = "植物大战僵尸杂交版"
+
+
+def _pick_game_dir():
+    """在 _GAME_ROOT 下找版本号最大的「植物大战僵尸杂交版X.YZ」目录。"""
+    env = os.environ.get("PVZHE_GAME")
+    if env:
+        return env
+    try:
+        cands = []
+        for name in os.listdir(_GAME_ROOT):
+            if not name.startswith(_GAME_DIR_PREFIX):
+                continue
+            # 取名字里的版本号用来排序：0.29 / 0.30 / 3.19 …
+            m = re.search(r"(\d+(?:\.\d+)+)", name)
+            key = tuple(int(x) for x in m.group(1).split(".")) if m else (0,)
+            sub = os.path.join(_GAME_ROOT, name, "植物大战僵尸杂交重制版")
+            if os.path.isdir(sub):
+                cands.append((key, sub))
+        if cands:
+            cands.sort(key=lambda kv: kv[0])
+            return cands[-1][1]
+    except OSError:
+        pass
+    return ""
+
+
+GAME = _pick_game_dir()
 REF_DIR = os.path.join(GAME, "data_PlantsVsZombies_windows_x86_64")
 UD = r"C:\Users\xiaochengc\AppData\Roaming\Godot\app_userdata\植物大战僵尸杂交版"
 MODS_DIR = os.path.join(UD, "Mods")
@@ -38,7 +73,7 @@ CHAR_KEY = "RandomImitater"
 MOD_NAME = "随机模仿者"
 MOD_ID = "randomimitater"
 # 版本号单一来源：改这里就够了（mod.json 与 README 都以此为准）。
-MOD_VERSION = "1.1.0"
+MOD_VERSION = "1.5.2"
 CFG_FILE = "TowerDefensePlantRandomImitater.tres"
 SCENE_FILE = "RandomImitater.tscn"
 SPRITE_FILE = "RandomImitater.tscn"
@@ -75,6 +110,22 @@ PHD = ("[color=FF0000]获取方式[/color]：[color=0000cd]Mod 植物（无需�
 PHS = ("随机模仿者旋转着，宛如风暴般裹挟着植物与僵尸，随机地投放到每个召唤它的人面前。"
        "有人因它而欣喜，也有人因它而愤怒，时不时也有挽留它的声音传来：“还会再见吗！”"
        "但随机模仿者不语，只是一味地旋转。")
+
+# ── 使用说明（mod.json 的 playInstructions）────────────────────────────
+# 对应游戏「Mod 管理」详情页「怎么玩」那一栏：
+#   XWModToolsPanel.RenderSelectedExperience() 读 XWModManifest.PlayInstructions，
+#   为空则显示占位文案「作者未提供使用说明，请参考上方简介。」—— 不写就是这个效果。
+#
+# ⚠️ 这里是 Godot.Label（不是 RichTextLabel），**不支持 BBCode**，
+#    写了 [color=...] 会原样显示成文字。只能用纯文本。
+#    该 Label 由 PlayerLabel("", 18, PlayerInk, true) 创建，最后那个 true
+#    ⇒ AutowrapMode = WordSmart，会自动换行，所以直接写 \n 分行即可。
+#
+# 刻意**不写卡池数量**（如 335 张 / 302 只）：那个数随游戏版本变，写死会在本体更新后变错。
+PI = ("在选卡界面「Mod 植物」页签选中它，无需解锁。\n"
+      "种下后随机开出植物（默认 65%）或敌对僵尸（默认 35%）。\n"
+      "默认 0 阳光、冷却 7.5 秒、本体 1000 血。\n"
+      "属性与显示配置可在游戏内「Mod 管理 → 配置」里实时调整，保存即生效。")
 
 
 # 内置资源（全部 res:// 引游戏自带）
@@ -116,7 +167,7 @@ def w(path, text):
 
 def cfg_tres():
     # plantGridType = [2, 6, 5]（GROUND/POT/LILYPAD）= TowerDefenseCharacterConfig 的
-    # **默认值**，也就是「普通植物」的落位规则。这正是用户要的「和普通植物一致」：
+    # **默认值**，也就是「普通植物」的落位规则，效果与普通植物完全一致：
     #   · 不许叠种模仿者（占住 slot[GROUND]，同类自然放不进）
     #   · 花盆 / 睡莲 / 南瓜壳 / 咖啡豆：按普通植物的规则走（空位可放、有植物则按引擎判定）
     #   · 墓碑、弹坑：不能种（与墓碑的拦截在 CanPacketPlant 的 FindPlantingBlocker，
@@ -244,8 +295,11 @@ def manifest():
         "author": "小橙c",
         "description": (
             f"新增植物「{PN}」（彩卡）：种下后随机开出植物或僵尸"
-            f"（65% 开出随机植物，35% 开出随机僵尸·敌对）。"
+            f"（默认 65% 开出随机植物，35% 开出随机僵尸·敌对）。"
+            f"属性与显示配置可在游戏内「Mod 管理 → 配置」实时调整。"
         ),
+        # 「Mod 管理」详情页的「怎么玩」栏；留空会显示游戏的占位提示。
+        "playInstructions": PI,
         "dependencies": [],
         "conflicts": [],
         "provides": {
@@ -255,6 +309,54 @@ def manifest():
         },
         "overrides": {},
         "scripts": [],
+        # ★ 游戏内「Mod 管理 → 配置」里显示的可调项（applyMode=immediate ⇒ 保存即生效）。
+        #   键名必须与 RandomImitaterEntry.cs 里的 Key* 常量一一对应。
+        #   注：BOSS / 巨人始终允许刷出，不提供开关。
+        "settings": [
+            {
+                "key": "plantChance",
+                "type": "int",
+                "label": "开出植物的概率",
+                "description": "种下随机模仿者后开出植物的概率。"
+                               "默认 65，即 65% 植物 / 35% 僵尸。0 = 只出僵尸，100 = 只出植物。"
+                               "保存后立即生效。",
+                "group": "属性",
+                "default": 65,
+                "min": 0,
+                "max": 100,
+                "step": 5,
+                "applyMode": "immediate",
+                "affectsGameplay": True,
+            },
+            {
+                "key": "sunCost",
+                "type": "int",
+                "label": "阳光消耗",
+                "description": "种下这张卡要的阳光。"
+                               "默认 0，免费种植，"
+                               "最大 1500。保存后立即生效。",
+                "group": "属性",
+                "default": 0,
+                "min": 0,
+                "max": 1500,
+                "step": 25,
+                "applyMode": "immediate",
+                "affectsGameplay": True,
+            },
+            {
+                "key": "colorizeResult",
+                "type": "bool",
+                "label": "随机模仿者不变白",
+                "description": "打开时，随机模仿者开出的植物与僵尸不再套用模仿者的黑白滤镜，"
+                               "保持原本配色。"
+                               "关闭则恢复游戏原版的黑白表现。"
+                               "保存后立即生效。",
+                "group": "显示",
+                "default": True,
+                "applyMode": "immediate",
+                "affectsGameplay": False,
+            },
+        ],
         "runtimeAssembly": "Runtime/ModAssembly.dll",
         "runtimeEntryType": "RandomImitaterEntry",
         "runtimeApiVersion": 1,
@@ -335,14 +437,35 @@ def package():
 
     os.makedirs(os.path.dirname(DIST), exist_ok=True)
     res_root = os.path.join(BASE, "Resources")
+
+    # ★ 打包要**可复现**：内容不变时，产出的 .pmod 字节必须完全一样。
+    #
+    #  `zipfile.write()` 会把每个文件的**磁盘修改时间**写进 ZIP 头。于是同一个工程、
+    #  同样的内容，只要重新编译一次（DLL 的 mtime 变了），整个 .pmod 的 SHA-256 就变 ——
+    #  README 里公示的校验值随即失效，玩家核对时会以为包被换过。
+    #  （实测：0.30 重新编译出的包，8 个条目内容逐字节相同，只因 DLL 时间戳不同，
+    #    整体 hash 从 1C88B4F0… 变成 80B493BC…。）
+    #
+    #  所以这里统一用固定的时间戳写 ZIP 条目。选 1980-01-01 00:00:00 是因为它是
+    #  ZIP 格式能表示的最小 DOS 时间，最不容易和真实文件时间混淆。
+    FIXED_TIME = (1980, 1, 1, 0, 0, 0)
+
+    def add(path, arcname):
+        info = zipfile.ZipInfo(arcname, date_time=FIXED_TIME)
+        info.compress_type = zipfile.ZIP_DEFLATED
+        # 0644 = 普通文件，避免把本机的权限位带进包里
+        info.external_attr = 0o644 << 16
+        with open(path, "rb") as fh:
+            z.writestr(info, fh.read())
+
     with zipfile.ZipFile(DIST, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(os.path.join(BASE, "mod.json"), "mod.json")
+        add(os.path.join(BASE, "mod.json"), "mod.json")
         for root, _dirs, files in os.walk(res_root):
-            for fn in files:
+            for fn in sorted(files):
                 fp = os.path.join(root, fn)
                 arc = os.path.relpath(fp, BASE).replace("\\", "/")
-                z.write(fp, arc)
-        z.write(dll, "Runtime/ModAssembly.dll")
+                add(fp, arc)
+        add(dll, "Runtime/ModAssembly.dll")
 
     with zipfile.ZipFile(DIST) as z:
         first = z.namelist()[0]
@@ -390,18 +513,31 @@ def install():
 
     en = os.path.join(MODS_DIR, "enabled_mods.json")
     try:
-        ids = []
+        # enabled_mods.json 有两种历史格式，都要认：
+        #   旧（≤0.29）：["modid", ...]                       纯数组
+        #   新（0.30）  ：{"schemaVersion":2,"enabledIds":[...],"preferredOrder":[]}
+        # 之前这里只按旧格式当数组处理，遇到新格式就抛
+        # AttributeError: 'dict' object has no attribute 'append' —— 结果启用列表
+        # 静默没更新，还得手动去游戏里点「启用」。两种格式都处理掉。
+        doc = None
         if os.path.isfile(en):
             with open(en, encoding="utf-8") as f:
-                ids = json.load(f)
+                doc = json.load(f)
+        if isinstance(doc, dict):
+            ids = doc.setdefault("enabledIds", [])
+        elif isinstance(doc, list):
+            ids = doc
+        else:
+            doc = {"schemaVersion": 2, "enabledIds": [], "preferredOrder": []}
+            ids = doc["enabledIds"]
         if MOD_ID not in ids:
             ids.append(MOD_ID)
             with open(en, "w", encoding="utf-8") as f:
-                json.dump(ids, f, ensure_ascii=False, indent=2)
+                json.dump(doc, f, ensure_ascii=False, indent=2)
             log("[install] enabled_mods.json += " + MOD_ID)
         else:
             log("[install] enabled_mods.json 已含 " + MOD_ID)
-        log("[install] enabled_mods.json = " + json.dumps(ids, ensure_ascii=False))
+        log("[install] enabled_mods.json = " + json.dumps(doc, ensure_ascii=False))
     except Exception as e:
         log("[install] enabled_mods.json 合并失败: %r" % e)
     return True

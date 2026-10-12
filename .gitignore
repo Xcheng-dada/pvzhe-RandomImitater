@@ -9,6 +9,11 @@
 # .cache/ 里是 dotnet_home 与 nuget 缓存（约 117 个文件）
 .cache/
 
+# ---- Python 缓存 ----
+# 跑 build_mod.py 时 Python 会生成 __pycache__（.pyc 字节码），属中间产物。
+__pycache__/
+*.pyc
+
 # ---- C# 编译中间产物 ----
 # src/obj/ 是 MSBuild 生成的中间文件，里面写死了本机路径，
 # 例如 F:\桌面\随机模仿者Mod\... 和 C:\Users\<你>\AppData\...

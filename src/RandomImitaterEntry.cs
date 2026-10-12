@@ -10,9 +10,10 @@ using PVZHE.ModEditor.ModSystem;
 /// ── 需求 ───────────────────────────────────────────────────────
 /// **不改动**游戏任何现有内容，只**新增**一个植物 `RandomImitater`：
 ///   种下之后随机开出（从「全部植物卡 + 全部僵尸卡」里抽一张）：
-///     · 65% 开出随机植物；
-///     · 35% 开出随机僵尸（敌对，会朝玩家的房子走）。
+///     · 默认 65% 开出随机植物；
+///     · 默认 35% 开出随机僵尸（敌对，会朝玩家的房子走）。
 ///   植物与僵尸**各自等概率**：每张植物、每只僵尸中奖率相同，与卡池分类无关。
+///   ★ 植物概率与「彩色化」开关可在游戏内「Mod 管理 → 配置」里实时调整，保存即生效。
 ///
 /// ── 实现原理（复用游戏内置能力，零改动）───────────────────────
 /// 游戏本体的 `TowerDefensePlantImitater.Explode()` 已经写好了这段逻辑：
@@ -64,8 +65,9 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	/// 副作用」，不是有意设计。这里靠**同类卡重复相同次数**来控比例（见 BuildWeighted），
 	/// 且组内严格等概率：每张植物、每只僵尸中奖率一致，不因白卡数量多就更容易出。
 	///
-	/// 想改：0.7 = 七成植物，0.3 = 三成植物，1.0 = 只出植物，0.0 = 只出僵尸。
-	/// 改完 `BuildWeighted` 会自动重新搜索最优的重复次数，无需手工调列表。
+	/// ★ 现在这是**默认值**，玩家可在游戏内「Mod 管理 → 配置」里实时改
+	///   （设置键 <see cref="KeyPlantChance"/>，int 百分比 0~100）。
+	///   改完立刻生效：本 Mod 每帧比对一次，变化就重建混合卡池（见 DriveSettingsWatch）。
 	///
 	/// ✅ 现在 `plantGridType` 收窄成 [2,6,5]（和普通植物一致）也照样生效：
 	/// 自定义的 `RandomImitater.RiExplode()` 会**先把自己从格子上腾走**
@@ -73,7 +75,16 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	/// 所以校验看到的一格是空地，植物不会被自己挡掉。
 	/// （旧版必须留 [-1] 的原因就是没有这一步 —— 见 RandomImitater 类注释。）
 	/// </summary>
-	private const double PlantChance = 0.65;
+	private const double DefaultPlantChance = 0.65;
+
+	/// <summary>
+	/// ★ 阳光消耗的默认值与上限。
+	///
+	/// 默认 0（免费）与卡牌设计一致：这张卡有概率开出敌对僵尸，
+	/// 再收阳光就太苛刻。上限 1500 交给游戏内配置项约束。
+	/// </summary>
+	private const int DefaultSunCost = 0;
+	private const int MaxSunCost = 1500;
 
 	/// <summary>僵尸在卡池里的分类名。</summary>
 	private const string ZombieCat = "Zombie";
@@ -92,24 +103,26 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	private const int MixedListMaxLen = 32768;
 
 	/// <summary>
-	/// ★ 是否允许抽出「BOSS 僵尸」。
+	/// ★ 是否允许抽出「BOSS 僵尸」与「巨人僵尸」。
 	///
-	/// 卡池里确实有 3 个 BOSS：`ZombieBoss` / `ZombieBossDave` / `ZombieBossEdgarII`。
-	/// 它们走的是标准实例化路径（`PacketConfig.Create` → `TowerDefenseManager.CreateCharacter`
-	/// → BOSS 自己的 `_Ready()` / `InitializeBossGameplay()`），所以**能正常生成**。
-	/// 但 BOSS 血量极高、还会召唤小怪，随机开出来可能直接毁掉一局。
-	///
-	/// true  = 允许（默认，符合「完全随机」的设定）
-	/// false = 把 BOSS 从池子里剔除
+	/// 常量 true ⇒ BOSS / 巨人都留在随机池里，符合「完全随机」的设定，
+	/// 不提供开关。
 	/// </summary>
 	private const bool AllowBossZombie = true;
-
-	/// <summary>
-	/// ★ 是否允许抽出「巨人僵尸 / 红眼巨人」（Gargantuar 系列，池子里共 30 种）。
-	///
-	/// 同理：能正常生成，但强度远高于普通僵尸。
-	/// </summary>
 	private const bool AllowGargantuar = true;
+
+	// ─────────────── 游戏内设置键（与 mod.json 的 settings[].key 一一对应）───────────────
+	// ★ 键名必须与清单里完全一致，否则读不到值、只能一直用默认值。
+	//   清单由 build_mod.py 的 manifest() 生成，两处要同步改。
+
+	/// <summary>出植物概率（整数百分比 0~100）。</summary>
+	private const string KeyPlantChance = "plantChance";
+
+	/// <summary>开出的植物/僵尸是否保持彩色（关掉游戏给模仿者产物加的黑白滤镜）。</summary>
+	private const string KeyColorize = "colorizeResult";
+
+	/// <summary>这张卡的阳光消耗（0~1500）。</summary>
+	private const string KeySunCost = "sunCost";
 
 	/// <summary>
 	/// 植物卡池里需要排除的 key —— 只排除**自己**，避免开出自己导致递归开出。
@@ -139,6 +152,15 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	}
 
 	/// <summary>
+	/// 「彩色化」开关的静态镜像，供伴随脚本类 <c>RandomImitater</c> 读取
+	/// （它无法访问本入口的实例字段）。由 <see cref="ReadSettings"/> 维护。
+	///
+	/// true  = 清掉游戏给模仿者产物加的黑白滤镜，植物/僵尸保持原本配色；
+	/// false = 保留游戏原生的黑白表现。
+	/// </summary>
+	internal static bool ColorizeResult = true;
+
+	/// <summary>
 	/// ★ 无限选取：让卡池里这张卡**每点一次就新增一张**到卡槽，直到卡槽满。
 	///
 	/// 游戏原生是「开关式」的（`TowerDefenseBattleFeaturePacketBank.PacketChoose`）：
@@ -158,6 +180,69 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	private bool _started;
 	private bool _bankOk;
 	private int _diag;
+
+	// ─────────────── 游戏内设置（即时生效）───────────────
+
+	/// <summary>本 Mod 的配置对象；拿不到时为 null（此时一律用默认值）。</summary>
+	private XWModSettings _settings;
+
+	/// <summary>当前生效的出植物概率（0~1）。</summary>
+	private double _plantChance = DefaultPlantChance;
+
+	/// <summary>
+	/// 上一帧从设置里读到的原始值快照，用于判断「有没有变」。
+	/// 用原始 int/bool 而不是换算后的 double，避免浮点误差导致每帧都判定为变化。
+	/// </summary>
+	private int _rawPlantChance = int.MinValue;
+	private bool _rawColorize;
+	private int _rawSunCost = int.MinValue;
+
+	/// <summary>设置读取是否已经成功过一次（用于日志）。</summary>
+	private bool _settingsLogged;
+
+	/// <summary>设置读取失败是否已提示过（只提示一次，避免刷屏）。</summary>
+	private bool _settingsWarned;
+
+	/// <summary>最近一次「因设置变化而重建卡池」的日志标记。</summary>
+	private int _rebuildCount;
+
+	/// <summary>
+	/// 图鉴 <c>handbookDescribe</c> 的**原始文本**（首次读到时的样子）。
+	/// 每次都从它重建，而不是在上一次改写结果上继续替换 ⇒ 反复切换概率不会文案漂移。
+	/// null = 还没读过；判定细节见 <see cref="SyncCardPresentation"/>。
+	/// </summary>
+	private string _handbookOriginal;
+
+	/// <summary>
+	/// 本卡 <c>characterConfig.cost</c> 的**原始值**（首次读到时的样子），
+	/// 供「恢复默认」时回到打包值而不是硬编码 0。int.MinValue = 还没读过。
+	/// </summary>
+	private int _costOriginal = int.MinValue;
+
+	/// <summary>
+	/// 本卡 <c>characterConfig.costNight</c> 的**原始值**。
+	/// 只有它不是 -1（游戏用 -1 表示「夜图不单独定价」）时，才跟着 cost 一起同步；
+	/// 见 <see cref="SyncCardPresentation"/> 里对 <c>GetCostBeforeModifiers</c> 的 IL 说明。
+	/// </summary>
+	private int _costNightOriginal = int.MinValue;
+
+	/// <summary>图鉴 / 阳光消耗待同步。资源未就绪时置位，就绪后由 OnFrame 重试。</summary>
+	private bool _presentationDirty;
+
+	/// <summary>「没点中推车」的诊断已报条数（上限 3，见 MowerMissDiag）。</summary>
+	private int _mowerMissLogged;
+
+	/// <summary>上一帧右键是否按住，用于只在「按下那一下」触发的边沿检测。</summary>
+	private bool _mowerRightDown;
+
+	/// <summary>小推车触发链路的异常是否已提示过（只提示一次，避免刷屏）。</summary>
+	private bool _mowerErrLogged;
+
+	/// <summary>
+	/// 点击判定的容差（单位：**格子**）。1.0 = 以推车绘制原点为中心、一整个格子大小
+	/// 的方框内都算点中。行号另外单独严格比对，所以放大这个值也不会跨行误触。
+	/// </summary>
+	private const float MowerClickCellTolerance = 1.0f;
 
 	/// <summary>按卡实例 ID 记录已接管的卡池卡（仅用于日志去重）。</summary>
 	private readonly HashSet<ulong> _hooked = new HashSet<ulong>();
@@ -292,6 +377,18 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 		try
 		{
 			string root = (context == null) ? "<null>" : context.PackageRoot;
+			// ★ 配置对象要在这里抓住：它绑定的就是这个 Mod 的会话，
+			//   后续 Initialize 返回后 context 不再可靠，而设置值是随时会变的。
+			try
+			{
+				_settings = context == null ? null : context.Settings;
+			}
+			catch (Exception ex)
+			{
+				_settings = null;
+				Log("拿不到 Mod 配置（将一直使用默认值）：" + ex.Message);
+			}
+			ReadSettings(true);
 			Log("初始化完成；PackageRoot=" + root + "。种下后将从植物+僵尸混合卡池里随机开出。");
 		}
 		catch (Exception ex)
@@ -341,6 +438,7 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 		finally
 		{
 			_started = false;
+			try { RandomImitater.ClearColorizeTracking(); } catch { }
 		}
 	}
 
@@ -358,9 +456,20 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			{
 				return;
 			}
+			// ★ 设置随时可能被玩家改（游戏内「Mod 管理 → 配置」保存后立刻生效）。
+			//   放在 EnsureMixedBank 之前：若本帧发现设置变了，先把卡池标记为待重建，
+			//   紧接着的 EnsureMixedBank 就会用新参数重建，同一帧完成，无需等下一帧。
+			DriveSettingsWatch();
 			if (!_bankOk)
 			{
 				_bankOk = EnsureMixedBank();
+			}
+			// 图鉴概率文字 / 阳光消耗待同步：Initialize 阶段资源可能还没加载，那时改不动；
+			// 加载完成后由这里补上，成功一次即停，不会每帧反复写资源。
+			if (_presentationDirty
+				&& SyncCardPresentation(_rawPlantChance, _rawSunCost))
+			{
+				_presentationDirty = false;
 			}
 			if (InfiniteSelect)
 			{
@@ -376,9 +485,14 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			{
 				DriveGroupHook();
 			}
+			// 右键手动放行小推车（内部自带「游戏进行中 + 点中推车」双重门槛）。
+			DriveMowerRightClick();
 			// 场上有模仿者时，逐帧把「免咬」开关按回可被咬的取值
 			// （引擎进旋转状态会自己设无敌/免咬，只在 _Ready 写一次会被覆写）
 			RandomImitater.TickAllBiteable();
+			// 逐帧清掉游戏给「本 Mod 抽出」的产物加的黑白滤镜（彩色化开关为开时）。
+			// 必须逐帧做：植物那条路径是 CallDeferred，会晚于我们设置 ⇒ 只设一次会被盖掉。
+			RandomImitater.TickAllColorize();
 		}
 		catch (Exception ex)
 		{
@@ -1002,7 +1116,91 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			}
 		}
 		catch { }
+
+		// ④ 把已选中的池卡置灰（原生「开关式选卡」的另一半，见方法内注释）。
+		GreyOutSelectedPoolCards(feature, seedBank);
+
 		return gotMine;
+	}
+
+	/// <summary>
+	/// 重建卡槽之后，把「已经在卡槽里」的那些池卡置灰（<c>alive = false</c>）。
+	///
+	/// ★ 为什么必须补这一步（IL 证据）：原生点卡走
+	///   <c>TowerDefenseBattleFeaturePacketBank.PacketChoose</c>，它在
+	///   IL_00e4 调 <c>CreateAnime</c> 之后紧跟 IL_00ea <c>set_alive(false)</c>
+	///   —— 这就是「选中的卡在卡池里变黑、再点一次取消」那套开关模式的来源。
+	///   本 Mod 的整次重建直接调 <c>CreateAnime</c> / <c>AddPacket</c>，
+	///   绕过了 <c>PacketChoose</c> ⇒ 卡槽恢复对了，但卡池里那些卡**全亮着**，
+	///   看起来像「什么都没选上」，而且再点一次也不会取消。
+	///   （只有本卡例外：它被无限选取接管，本来就该一直可点。）
+	///
+	/// ★ 判据用 <c>seedBank.HasPacket(key)</c>（卡槽**实况**），不用传进来的期望列表：
+	///   重建可能因为「卡槽已满 break」「某项取不到配置 continue」而少放几张，
+	///   按期望列表置灰会把**没真正选上**的卡也弄黑，玩家就点不动它了。
+	///   这也与原生 <c>BindVirtualizedPacket</c>（IL_007d <c>HasPacket</c> →
+	///   IL_0088 <c>set_alive</c>）和 <c>PacketChooseFromName</c> 的判据一致。
+	///
+	/// ★ 只做「置灰」，不做「恢复变亮」：恢复是原生负责的 ——
+	///   上面 <c>DeleteAllPacket()</c> 会对每张被移除的卡调 <c>PacketAlive(key)</c>
+	///   把池卡重新点亮。所以到这里为止所有池卡都是亮的，只需把该灰的灰掉。
+	///   刻意不主动点亮任何卡，免得把引擎因别的原因（未解锁 / 锁卡）置灰的卡错误点亮。
+	/// </summary>
+	private void GreyOutSelectedPoolCards(
+		TowerDefenseBattleFeaturePacketBank feature, TowerDefenseInGameSeedBank seedBank)
+	{
+		try
+		{
+			if (feature == null || !GodotObject.IsInstanceValid(feature))
+			{
+				return;
+			}
+			if (seedBank == null || !GodotObject.IsInstanceValid(seedBank))
+			{
+				return;
+			}
+			Godot.Collections.Array<TowerDefenseInGamePacketShow> pool = feature.packetList;
+			if (pool == null)
+			{
+				return;
+			}
+			for (int i = 0; i < pool.Count; i++)
+			{
+				TowerDefenseInGamePacketShow card = pool[i];
+				if (card == null || !GodotObject.IsInstanceValid(card))
+				{
+					continue;
+				}
+				string key = KeyOf(card);
+				if (string.IsNullOrEmpty(key) || key == MyKey)
+				{
+					continue;   // 本卡由无限选取保持可点，不能灰
+				}
+				bool selected;
+				try { selected = seedBank.HasPacket(key); } catch { continue; }
+				if (!selected)
+				{
+					continue;   // 没真正进卡槽 ⇒ 保持可点
+				}
+				try
+				{
+					if (card.alive)
+					{
+						card.alive = false;   // 与原生 PacketChoose IL_00ea 一致
+					}
+				}
+				catch { }
+			}
+		}
+		catch (Exception ex)
+		{
+			if (_reselectErrLogged)
+			{
+				return;
+			}
+			_reselectErrLogged = true;
+			Log("恢复池卡置灰状态时出错（本条只报一次）：" + ex.Message);
+		}
 	}
 
 	/// <summary>
@@ -1660,6 +1858,671 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 		return null;
 	}
 
+	// ================================================================ 游戏内设置（即时生效）
+
+	/// <summary>
+	/// 每帧检查一次游戏内设置有没有被改。发现变化就**立刻重建混合卡池**，
+	/// 玩家在「Mod 管理 → 配置」里改完点保存，无需重启、无需退出关卡即生效。
+	///
+	/// ★ 为什么用轮询而不是订阅 <c>XWModSettings.Changed</c>：
+	///   事件只在保存那一刻触发一次。若本 Mod 加载得比设置激活晚（或激活发生在
+	///   Initialize 之前），订阅就永远等不到那次通知，表现成「改了没反应」。
+	///   轮询每帧比对几个 int/bool，开销可忽略，且不依赖任何时序假设。
+	///
+	/// ★ 比较用**原始值**（int / bool），不比较换算后的 double：
+	///   百分比→概率会引入浮点误差，用 double 比会出现「永远判定为变化」的死循环。
+	/// </summary>
+	private void DriveSettingsWatch()
+	{
+		try
+		{
+			if (_settings == null)
+			{
+				return;   // 拿不到配置：一直用默认值，没什么可监视的
+			}
+			ReadSettings(false);
+		}
+		catch (Exception ex)
+		{
+			if (!_settingsWarned)
+			{
+				_settingsWarned = true;
+				Log("设置监视异常（本条只报一次，将继续使用上次的值）：" + ex.Message);
+			}
+		}
+	}
+
+	/// <summary>
+	/// 从 <see cref="_settings"/> 读出配置项并换算成本 Mod 的运行时参数。
+	/// 「出植物概率」变化 ⇒ 重建混合卡池；「彩色化」变化 ⇒ 立刻对场上产物生效。
+	/// </summary>
+	/// <param name="initial">
+	/// true = 初始化阶段（打日志、不做「变化」判断）；false = 每帧轮询。
+	/// </param>
+	private void ReadSettings(bool initial)
+	{
+		try
+		{
+			int rawChance = ReadInt(KeyPlantChance, (int)Math.Round(DefaultPlantChance * 100.0));
+			bool rawColorize = ReadBool(KeyColorize, true);
+			int rawCost = ReadInt(KeySunCost, DefaultSunCost);
+
+			// 防御：清单写错导致越界时夹到合法区间，绝不让坏值传到卡池构建里。
+			if (rawChance < 0) { rawChance = 0; }
+			if (rawChance > 100) { rawChance = 100; }
+			if (rawCost < 0) { rawCost = 0; }
+			if (rawCost > MaxSunCost) { rawCost = MaxSunCost; }
+
+			bool chanceChanged = rawChance != _rawPlantChance;
+			bool colorizeChanged = rawColorize != _rawColorize;
+			bool costChanged = rawCost != _rawSunCost;
+			bool changed = chanceChanged || colorizeChanged || costChanged;
+
+			if (!changed && !initial)
+			{
+				return;
+			}
+
+			_rawPlantChance = rawChance;
+			_rawColorize = rawColorize;
+			_rawSunCost = rawCost;
+
+			_plantChance = rawChance / 100.0;
+			ColorizeResult = rawColorize;   // 静态镜像：供伴随脚本类逐帧读取
+
+			// ★ 图鉴概率文字与阳光消耗都要跟着配置走（它们是 .tres 里的静态值）。
+			//   走到这里只可能是「初始化」或「值真的变了」，所以不会每帧白跑。
+			//   资源还没加载时保持待同步，由 OnFrame 逐帧补做，成功一次即停。
+			_presentationDirty = !SyncCardPresentation(rawChance, rawCost);
+
+			if (initial)
+			{
+				if (!_settingsLogged)
+				{
+					_settingsLogged = true;
+					Log("已读取游戏内配置：出植物 " + rawChance + "%、阳光消耗 "
+						+ rawCost + "、彩色化 " + (rawColorize ? "开" : "关")
+						+ "（BOSS / 巨人始终允许）。"
+						+ "可在游戏内「Mod 管理 → 配置」里实时修改。");
+				}
+				return;
+			}
+
+			// 彩色化开关变了 ⇒ 下一帧 TickAllColorize 就会把新取值应用到场上所有产物
+			// （那里每帧都按当前开关重设一遍，所以无需在这里额外做什么）。
+			if (colorizeChanged)
+			{
+				Log("检测到「彩色化」改为 " + (rawColorize ? "开" : "关")
+					+ " ⇒ 立即应用到场上所有随机模仿者产物。");
+			}
+
+			if (costChanged)
+			{
+				Log("检测到阳光消耗改为 " + rawCost + " ⇒ 已同步到卡牌与图鉴。");
+			}
+
+			// 概率变了 ⇒ 重建卡池（只影响之后种下的）。
+			if (chanceChanged)
+			{
+				_rebuildCount++;
+				_bankOk = false;
+				Log("检测到出植物概率变化（第 " + _rebuildCount + " 次）：" + rawChance
+					+ "% ⇒ 立即重建混合卡池。");
+			}
+		}
+		catch (Exception ex)
+		{
+			Log("读取设置失败（继续用当前值）：" + ex.Message);
+		}
+	}
+
+	/// <summary>读一个整数设置项；缺失/类型不符时返回 <paramref name="fallback"/>。</summary>
+	private int ReadInt(string key, int fallback)
+	{
+		try
+		{
+			if (_settings == null)
+			{
+				return fallback;
+			}
+			// ★ 用框架公开的 Get<T>()，而不是反射读 internal 的 Values：
+			//   Get<T> 缺失键会抛 KeyNotFoundException、类型不符会抛 InvalidCastException，
+			//   都在这里接住并回退默认值 —— 玩家把清单改坏也不会让 Mod 失效。
+			return _settings.Get<int>(key);
+		}
+		catch
+		{
+			return fallback;
+		}
+	}
+
+	/// <summary>读一个布尔设置项；缺失/类型不符时返回 <paramref name="fallback"/>。</summary>
+	private bool ReadBool(string key, bool fallback)
+	{
+		try
+		{
+			if (_settings == null)
+			{
+				return fallback;
+			}
+			return _settings.Get<bool>(key);
+		}
+		catch
+		{
+			return fallback;
+		}
+	}
+
+	/// <summary>
+	/// 图鉴里那两句概率文案的锚点。用「纯字符串定位」而不是正则：
+	/// 游戏的发布包裁剪过 BCL，<c>Regex.Replace(string, string, int)</c> 这个重载
+	/// 在运行时根本不存在（实测日志：Method not found），而且它是在**方法 JIT 阶段**
+	/// 抛出的 —— 连方法内部的 try/catch 都拦不住，会把整条同步链路一起打断。
+	/// 所以这里只用 IndexOf / 逐字符扫描。
+	/// </summary>
+	private const string HandbookPlantAnchor = "概率开出随机植物";
+	private const string HandbookZombieAnchor = "概率开出随机僵尸";
+
+	/// <summary>
+	/// 把图鉴原文里的两个百分比换成 <paramref name="plantPercent"/> 与其余数。
+	/// 定位不到锚点（官方改了文案）就返回 null ⇒ 调用方不动图鉴，绝不写坏。
+	///
+	/// ★ 只用 IndexOf / 逐字符比较 + 字符串拼接，刻意不引入 Regex / StringBuilder /
+	///   IFormatProvider 之类：游戏发布包裁剪过 BCL，缺哪个重载就得等运行时才知道，
+	///   而缺方法异常发生在**方法 JIT 阶段**，方法内的 try/catch 拦不住。
+	/// </summary>
+	private static string BuildHandbookText(string original, int plantPercent)
+	{
+		if (string.IsNullOrEmpty(original))
+		{
+			return null;
+		}
+		int a = original.IndexOf(HandbookPlantAnchor, StringComparison.Ordinal);
+		if (a < 0)
+		{
+			return null;
+		}
+		int b = original.IndexOf(HandbookZombieAnchor,
+			a + HandbookPlantAnchor.Length, StringComparison.Ordinal);
+		if (b < 0)
+		{
+			return null;
+		}
+
+		// 期望形态：「…<数字A>%<锚点1>…<数字B>%<锚点2>…」
+		//   替换段1 = [digitsA, a)   —— 数字A 加它后面那个 '%'（在 a-1）
+		//   中间段  = [a, digitsB)   —— 锚点1 到数字B 之前，不含数字B 与它的 '%'
+		//   替换段2 = [digitsB, b)   —— 数字B 加它后面那个 '%'（在 b-1）
+		int digitsA = ScanBackPercentStart(original, a);
+		int digitsB = ScanBackPercentStart(original, b);
+		if (digitsA < 0 || digitsB < 0 || digitsB <= a)
+		{
+			return null;
+		}
+
+		// 中文区域设置下数字就是 ASCII，直接拼接即可，不必指定格式提供者。
+		return original.Substring(0, digitsA) + plantPercent + "%"
+			+ original.Substring(a, digitsB - a) + (100 - plantPercent) + "%"
+			+ original.Substring(b);
+	}
+
+	/// <summary>
+	/// 从锚点 <paramref name="anchor"/> 往回找数字段的**起点**。
+	/// 形态必须是「数字 + % + 锚点」（'%' 恰好位于 anchor-1），不合形态返回 -1。
+	/// </summary>
+	private static int ScanBackPercentStart(string s, int anchor)
+	{
+		if (anchor <= 0 || s[anchor - 1] != '%')
+		{
+			return -1;   // 锚点前不是 '%'
+		}
+		int start = anchor - 1;   // 先指向 '%'
+		while (start > 0 && s[start - 1] >= '0' && s[start - 1] <= '9')
+		{
+			start--;
+		}
+		return start == anchor - 1 ? -1 : start;   // '%' 前没有数字 ⇒ 形态不对
+	}
+
+	/// <summary>
+	/// 把「本卡的展示与花费」同步成当前配置值：图鉴概率文字 + 阳光消耗。
+	///
+	/// ★ 为什么必须做：图鉴的 <c>handbookDescribe</c> 与 <c>characterConfig.cost</c>
+	///   都是打包进 <c>Resources/*.tres</c> 的**静态值**，不会自己反映运行时配置。
+	///   不同步就会出现「实际按 70% 出、图鉴仍写 65%」「实际收 200 阳光、图鉴写 0」
+	///   这种自相矛盾。
+	///
+	/// ★ 必须用 <c>GetPacketConfigReadOnly</c>，不能用 <c>GetPacketConfig</c>
+	///   （这条是踩过坑之后用 IL 确认的）：
+	///   · <c>GetPacketConfig</c>：IL_0175 起 <c>Resource.Duplicate(true)</c> ⇒
+	///     返回的是**副本**，改它对本体毫无影响（图鉴不动就是这个原因）。
+	///   · <c>GetPacketConfigReadOnly</c>：IL_0017 取 Variant → IL_0019
+	///     <c>AsGodotObject</c> → IL_001e <c>castclass</c> 后**直接返回**，
+	///     即 ResourceManager 里那份**共享实例**；<c>Almanac.InitPlant</c> 用的
+	///     正是它 ⇒ 改这份才会反映到图鉴。
+	///
+	/// ★ 花费写 <c>characterConfig.cost</c> 的优先级依据
+	///   （<c>GetCostBeforeModifiers</c> 的 IL）：
+	///   IL_0015 先取 <c>characterConfig.cost</c>，IL_001c/IL_003e 只在
+	///   <c>overrideCost</c> / <c>_override.cost</c> **不等于 -1** 时才覆盖它们。
+	///   本卡这两项都没设（-1 / null），所以写 <c>characterConfig.cost</c>
+	///   既管住种植扣阳光，也管住图鉴的「花费:」标签（IL_0504 直接读该字段）。
+	///
+	/// ★ 幂等：概率文案每次从 <see cref="_handbookOriginal"/>（首次读到的原文）重建，
+	///   花费每次从 <see cref="_costOriginal"/> 出发，不在上一次结果上继续改 ⇒
+	///   反复切换配置不会漂移，「恢复默认」也能干净回到打包值。
+	///
+	/// ★ 返回 false 表示「资源还没加载」，调用方保持待同步、稍后重试。
+	/// </summary>
+	private bool SyncCardPresentation(int plantPercent, int sunCost)
+	{
+		try
+		{
+			TowerDefensePacketConfig cfg
+				= TowerDefenseManager.GetPacketConfigReadOnly(MyKey);
+			if (cfg == null || !GodotObject.IsInstanceValid(cfg))
+			{
+				return false;   // 资源还没加载：保持待同步，下一帧再试
+			}
+
+			bool allOk = true;
+
+			// ── ① 图鉴概率文字 ──
+			string text = cfg.handbookDescribe;
+			if (text == null)
+			{
+				allOk = false;   // 还没加载完，稍后重试
+			}
+			else
+			{
+				if (_handbookOriginal == null)
+				{
+					_handbookOriginal = text;
+				}
+				// 定位不到锚点（官方改了文案）就返回 null ⇒ 不动图鉴，避免写坏。
+				string replaced = BuildHandbookText(_handbookOriginal, plantPercent);
+				if (replaced != null && replaced != text)
+				{
+					cfg.handbookDescribe = replaced;
+				}
+			}
+
+			// ── ② 阳光消耗 ──
+			TowerDefenseCharacterConfig cc = cfg.characterConfig
+				as TowerDefenseCharacterConfig;
+			if (cc == null || !GodotObject.IsInstanceValid(cc))
+			{
+				allOk = false;
+			}
+			else
+			{
+				if (_costOriginal == int.MinValue)
+				{
+					_costOriginal = cc.cost;
+					_costNightOriginal = cc.costNight;
+				}
+				int want = sunCost < 0 ? 0 : (sunCost > MaxSunCost ? MaxSunCost : sunCost);
+				if (cc.cost != want)
+				{
+					cc.cost = want;
+				}
+				// ★ 夜价：GetCostBeforeModifiers 在 IL_0052-IL_005e 读 costNight，
+				//   只有它 **!= -1** 且当前是夜图时才用它计价（-1 = 本卡没有夜价）。
+				//   TowerDefenseCharacterConfig..ctor 在 IL_009c 把 costNight 初始化为
+				//   -1，而本卡的 .tres 没写这个字段 ⇒ 它本来就是 -1，改 cost 即可
+				//   日夜统一生效。这里保留一个守卫：万一将来给本卡加了夜价
+				//   （costNight != -1），就跟着一起同步，免得「白天 200、夜里另一个价」。
+				if (_costNightOriginal != -1 && cc.costNight != want)
+				{
+					cc.costNight = want;
+				}
+			}
+
+			return allOk;
+		}
+		catch
+		{
+			// 展示与花费同步失败绝不影响玩法；保持待同步，稍后再试。
+			return false;
+		}
+	}
+
+	// ================================================================ 右键放行小推车
+
+	/// <summary>
+	/// 鼠标右键**点到某台小推车** ⇒ 让它立刻发车（原生逻辑里推车只在僵尸撞到它时才动）。
+	///
+	/// 用到的游戏成员全部是 public，不需要反射私有字段（IL 证据）：
+	///   · <c>TowerDefenseManager.GetMowerFeature()</c>：public 实例方法，取本关的推车特性。
+	///   · <c>TowerDefenseBattleFeatureMower.mowerLine</c>：public 字段，类型
+	///     <c>Array&lt;TowerDefenseMower&gt;</c>，**下标即行号**。
+	///   · <c>TowerDefenseMower.Run()</c>：public，方法体只有
+	///     <c>if (!CanStartRun()) return; ActivateGameplayProcessing();
+	///       SendStateEvent("ToRun");</c>
+	///     ⇒ 发车走的还是原生状态机 <c>mower.run</c>（音效、加速、撞击判定全都在
+	///     <c>RunEntered</c> / <c>RunProcessing</c> 里），不是伪造的假动画。
+	///
+	/// ★ 命中判定在**画布全局空间**里做，锚点取 <c>transformPoint</c>，
+	///   **不用** <c>WorldHitRect</c>：
+	///   后者来自 <c>GetGlobalTransformForShadow</c>，那个变换的基向量在第一次调用时
+	///   就被冻结（IL_0036-IL_0044）、原点还会被换成物理插值缓存
+	///   <c>_physicsGlobalPosition</c>（IL_0016-IL_0028）；角色没有命中框定义时
+	///   更会退化成「以该原点为中心的 DefaultAreaSize 大块」
+	///   （<c>get_WorldHitRect</c> IL_006b-IL_007b）。屋顶这类带偏移 / 缩放 /
+	///   逐列高度曲线的关卡上，它和屏幕上看到的车完全不重合 —— 点天空都能放车。
+	///   对照：原生自己的推车预览定位用的是 <c>GetMapCellPlantPos</c> +
+	///   逐格 <c>GetGroundHeight</c>（<c>TowerDefenseMowerManager.GetMowerPreviewPosition</c>
+	///   IL_0019 / IL_0045），是考虑了屋顶曲线的。
+	///
+	/// ★ 防重复触发用原生自己的标志：<c>MowerHitComponent.HitCheckCharacter</c>
+	///   IL_00e7-IL_0105 是 <c>if (!parent.run) { parent.Run(); parent.run = true; }</c>
+	///   ⇒ 发车瞬间 <c>run</c> 就为 true（<c>Run()</c> 自己不写，原生在外面补这一刀，
+	///   这里照做）。另外车跑到底时 <c>MowerRun(mower)</c> 在 IL_002c-IL_0034 把
+	///   <c>mowerLine[行号]</c> 置 null，所以「跳过 null」= 这一行已经没有车了。
+	///
+	/// ★ 为什么是每帧轮询、不写 <c>_Input</c> 覆写：本程序集刻意不用 Godot.NET.Sdk
+	///   （见 csproj 注释），没有源码生成器就不会把方法注册成 script method，
+	///   覆写 <c>_Input</c> 引擎永远不会调用。
+	///   <c>Input.IsMouseButtonPressed(MouseButton)</c> 是公开静态方法，可在
+	///   process_frame 里直接读；游戏里**没有任何地方**读右键
+	///   （全库 <c>MouseButtonsMask</c> 引用数为 0，推车的原生输入走
+	///   <c>Input.IsActionJustPressed("Press")</c>，见 <c>ProcessMowerInput</c> IL_000f），
+	///   所以占用它不会抢掉任何官方操作。
+	/// </summary>
+	private void DriveMowerRightClick()
+	{
+		bool down;
+		try
+		{
+			down = Input.IsMouseButtonPressed(MouseButton.Right);
+		}
+		catch
+		{
+			return;   // 输入状态都拿不到 ⇒ 本帧什么都不做，也不影响其它驱动
+		}
+
+		// 边沿检测：只在「松开 → 按下」那一帧往下走。
+		// 不做这一步的话按住右键会一帧一台连续放车，一把就把保命车全放空。
+		bool pressed = down && !_mowerRightDown;
+		_mowerRightDown = down;
+		if (!pressed)
+		{
+			return;
+		}
+
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return;
+			}
+			if (!mgr.IsGameRunning())
+			{
+				return;   // 选卡 / 结算 / 主菜单不响应
+			}
+			// ★ 这里刻意**不加**「鼠标停在 UI 控件上就不响应」的守卫：
+			//   战场上很可能铺着一层全屏 Control，那道守卫会把整个功能一起挡死。
+			//   而「必须点中推车那一格」本身就已经排除了点界面、点空地的情况。
+			TowerDefenseBattleFeatureMower feature = mgr.GetMowerFeature();
+			if (feature == null || !GodotObject.IsInstanceValid(feature))
+			{
+				return;   // 本关没有推车特性
+			}
+			Godot.Collections.Array<TowerDefenseMower> line = feature.mowerLine;
+			if (line == null || line.Count <= 0)
+			{
+				return;
+			}
+
+			int best = -1;
+			float bestDist = float.MaxValue;
+			Vector2 bestDelta = Vector2.Zero;
+			Vector2 bestHalf = Vector2.Zero;
+
+			for (int i = 0; i < line.Count; i++)
+			{
+				TowerDefenseMower m = line[i];
+				if (m == null || !GodotObject.IsInstanceValid(m))
+				{
+					continue;   // null ⇒ 这一行的车已经用掉了
+				}
+				// ★ 原生防撞标志：MowerHitComponent.HitCheckCharacter 在
+				//   IL_00e7-IL_0105 里是 `if (!parent.run) { parent.Run(); parent.run = true; }`
+				//   ⇒ 车一发车 run 就是 true（存档恢复也会写它）。
+				//   用它挡掉「已经在跑 / 已经用掉的车」，和原生用的是同一个标志。
+				if (m.run)
+				{
+					continue;
+				}
+				if (!m.CanStartRun())
+				{
+					continue;   // 游戏状态不允许发车（上面已判过，这里逐车再确认）
+				}
+				// ★★ 判定在**画布全局空间**里做，锚点用 transformPoint。
+				//   前两版的错误：
+				//     ① WorldHitRect 来自 GetGlobalTransformForShadow —— 基向量在
+				//        第一次调用时就被冻结（IL_0036-IL_0044）、原点被换成物理插值
+				//        缓存（IL_0016-IL_0028），屋顶上它和屏幕所见完全不重合；
+				//     ② GetLocalMousePosition() 反演的是**节点自身原点**，而屋顶
+				//        推车的节点原点并不在绘制位置上（车体画在偏移处）。
+				//
+				//   现在两边都是货真价实的画布全局坐标：
+				//     · 鼠标：GetGlobalMousePosition()（视口画布全局，任何节点取都一样）；
+				//     · 锚点：transformPoint.GetGlobalPosition()。
+				//   transformPoint 就是游戏自己认定的视觉锚点 —— 原生
+				//   TowerDefenseMower._Ready IL_00af-IL_00b5 生成推车出场特效时
+				//   用的正是它（GetLogicalGlobalPosition(transformPoint)），
+				//   跟着它 = 跟着玩家看到的那台车，屋顶偏移天然被包含。
+				//   半格尺寸同样换算到画布全局单位（格子尺寸 × 管理器全局缩放）。
+				Vector2 anchor = MowerAnchorGlobal(m);
+				Vector2 gp = m.GetGlobalMousePosition();
+				Vector2 half = MowerGlobalHalfCell(mgr);
+				Vector2 d = gp - anchor;
+				// 纯比较取绝对值（NaN 时判「没点中」，不误放车）。
+				if (d.X > half.X || d.X < -half.X
+					|| d.Y > half.Y || d.Y < -half.Y)
+				{
+					continue;
+				}
+				// 相邻行的框按一行一格排布，容差 1.0 时正好首尾相接、不重叠；
+				// 万一有重叠，取离锚点最近的那一台，保证一次右键只放一台车。
+				float dist = (d.X * d.X) + (d.Y * d.Y);
+				if (dist < bestDist)
+				{
+					bestDist = dist;
+					best = i;
+					bestDelta = d;
+					bestHalf = half;
+				}
+			}
+
+			// 每次都打诊断（限量 5 次）：命中了也要打 —— 之前只在「没命中」时打，
+			// 结果「命中了错误的那一行」这种最关键的场景反而没有数据。
+			MowerMissDiag(line, best);
+
+			if (best < 0)
+			{
+				return;   // 点到的不是推车 ⇒ 什么都不做
+			}
+
+			TowerDefenseMower target = line[best];
+			if (target == null || !GodotObject.IsInstanceValid(target))
+			{
+				return;
+			}
+			// 与原生触发点保持完全一致：Run() 之后立刻置 run
+			// （MowerHitComponent.HitCheckCharacter IL_00f9 → IL_0104 就是这个顺序）。
+			// Run() 本身不会写 run，不补这一刀的话车跑起来后还能被再次点着放一遍。
+			target.Run();
+			target.run = true;
+			Log("右键放行小推车：第 " + (best + 1) + " 行（鼠标相对锚点=("
+				+ (int)bestDelta.X + ',' + (int)bestDelta.Y
+				+ ") 半格=(" + (int)bestHalf.X + ',' + (int)bestHalf.Y + ")）。");
+		}
+		catch (Exception ex)
+		{
+			if (!_mowerErrLogged)
+			{
+				_mowerErrLogged = true;
+				Log("右键放行小推车异常（本条只报一次，其余功能不受影响）：" + ex.Message);
+			}
+		}
+	}
+
+	/// <summary>
+	/// 推车的**视觉锚点**（画布全局坐标）。
+	///
+	/// 首选 <c>transformPoint</c>（public 的 <c>Marker2D</c>）：原生
+	/// <c>TowerDefenseMower._Ready</c> IL_00af-IL_00b5 生成推车出场特效时用的就是它，
+	/// 也就是游戏自己认定的"这台车在哪儿"。
+	/// 拿不到时退回节点自身的全局位置（普通草坪关卡两者本来就差得不多）。
+	/// </summary>
+	private static Vector2 MowerAnchorGlobal(TowerDefenseMower m)
+	{
+		Marker2D tp = m.transformPoint;
+		if (tp != null && GodotObject.IsInstanceValid(tp))
+		{
+			return tp.GetGlobalPosition();
+		}
+		return m.GetGlobalPosition();
+	}
+
+	/// <summary>
+	/// 三个**候选锚点**的画布全局坐标，用于实测对比：
+	///   0 = 推车节点自身原点（第 2 版用过，屋顶上偏）
+	///   1 = transformPoint（第 3 版采用：原生生成出场特效用的锚点）
+	///   2 = sprite（真正画东西的那个 AdobeAnimateSprite）
+	///
+	/// 屋顶推车沿斜坡排列，节点原点并不落在绘制位置上，所以必须实测确认
+	/// 哪一个才和玩家看到的那台车对齐 —— 不再凭推断换锚点。
+	/// </summary>
+	private static void MowerCandidateAnchors(
+		TowerDefenseMower m, ref Vector2 a0, ref Vector2 a1, ref Vector2 a2)
+	{
+		a0 = m.GetGlobalPosition();
+		Marker2D tp = m.transformPoint;
+		a1 = (tp != null && GodotObject.IsInstanceValid(tp))
+			? tp.GetGlobalPosition() : a0;
+		AdobeAnimateSprite sp = m.sprite;
+		a2 = (sp != null && GodotObject.IsInstanceValid(sp))
+			? sp.GetGlobalPosition() : a0;
+	}
+
+	/// <summary>
+	/// 「一格多大」换算到**画布全局单位**，用于右键命中判定。
+	///
+	/// <c>GetMapGridSize()</c> 处在管理器的局部空间里，乘管理器的全局缩放
+	/// 即得屏幕上实际占多大。屋顶的战斗缩放会同时作用在鼠标与锚点两边，
+	/// 这里跟着一起缩放，比例关系保持不变。
+	///
+	/// 任何一步算出非正常值都返回 (0,0)，调用方据此放弃本次触发 ——
+	/// 宁可点不动，也不要把玩家唯一的保命车误放掉。
+	/// </summary>
+	private static Vector2 MowerGlobalHalfCell(TowerDefenseManager mgr)
+	{
+		Vector2 gridSize = mgr.GetMapGridSize();
+		Vector2 mgrScale = mgr.GetGlobalScale();
+		if (!SaneScale(mgrScale.X) || !SaneScale(mgrScale.Y))
+		{
+			return Vector2.Zero;
+		}
+		if (!SaneLength(gridSize.X) || !SaneLength(gridSize.Y))
+		{
+			return Vector2.Zero;
+		}
+		float hx = gridSize.X * mgrScale.X * 0.5f * MowerClickCellTolerance;
+		float hy = gridSize.Y * mgrScale.Y * 0.5f * MowerClickCellTolerance;
+		if (!(hx > 0f && hx < 4000f) || !(hy > 0f && hy < 4000f))
+		{
+			return Vector2.Zero;
+		}
+		return new Vector2(hx, hy);
+	}
+
+	/// <summary>
+	/// 缩放因子的合理区间。用**纯比较**判有效：NaN 与任何数比较都是 false，
+	/// 所以这一个条件同时挡掉 NaN、0、负数与无穷。
+	/// 刻意不用 float.IsNaN / float.IsInfinity —— 游戏自身没引用过它们
+	/// （全库 @ref 查无），而这类"编译通过、运行时才发现缺成员"的坑已经踩过一次。
+	/// </summary>
+	private static bool SaneScale(float v)
+	{
+		return v > 0.001f && v < 1000.0f;
+	}
+
+	/// <summary>长度（像素）的合理区间，判有效方式同 <see cref="SaneScale"/>。</summary>
+	private static bool SaneLength(float v)
+	{
+		return v > 1.0f && v < 10000.0f;
+	}
+
+	/// <summary>
+	/// 没点中任何推车时的**限量**诊断。
+	///
+	/// 同时打印两种候选锚点相对鼠标的偏移：
+	///   T = transformPoint.GetGlobalPosition()（游戏生成推车特效用的视觉锚点，当前采用）
+	///   N = 推车节点自身的 GetGlobalPosition()（旧版做法，屋顶上会偏）
+	/// 半格容差也一并给出。三个数都在画布全局空间里，直接可比 ——
+	/// 哪一组接近 (0,0) 就说明该用哪个锚点，一轮实测即可定案。
+	///
+	/// 最多报 3 条（只在真的按了右键且场上有车时才会走到这里），不会刷屏。
+	/// </summary>
+	private void MowerMissDiag(
+		Godot.Collections.Array<TowerDefenseMower> line, int best)
+	{
+		if (_mowerMissLogged >= 5)
+		{
+			return;
+		}
+		_mowerMissLogged++;
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return;
+			}
+			// 用字符串拼接而不是 StringBuilder：本文件里 `+` 拼接已在游戏内验证可用，
+			// 少依赖一个类型就少一分「运行时才发现缺成员」的风险。
+			string detail = "";
+			int available = 0;
+			for (int i = 0; i < line.Count; i++)
+			{
+				TowerDefenseMower m = line[i];
+				if (m == null || !GodotObject.IsInstanceValid(m))
+				{
+					continue;
+				}
+				if (m.run || !m.CanStartRun())
+				{
+					continue;
+				}
+				available++;
+				if (available > 5)
+				{
+					continue;   // 一行一台，5 行足够；再多只是刷屏
+				}
+				Vector2 gp = m.GetGlobalMousePosition();
+				Vector2 a0 = Vector2.Zero, a1 = Vector2.Zero, a2 = Vector2.Zero;
+				MowerCandidateAnchors(m, ref a0, ref a1, ref a2);
+				Vector2 half = MowerGlobalHalfCell(mgr);
+				detail = detail + " | 第 " + (i + 1) + " 台 差节点=("
+					+ (int)(gp.X - a0.X) + "," + (int)(gp.Y - a0.Y)
+					+ ") 差tp=(" + (int)(gp.X - a1.X) + "," + (int)(gp.Y - a1.Y)
+					+ ") 差图=(" + (int)(gp.X - a2.X) + "," + (int)(gp.Y - a2.Y)
+					+ ") 半格=(" + (int)half.X + "," + (int)half.Y + ")";
+			}
+			Log("右键诊断（第 " + _mowerMissLogged + " 次，本次命中第 "
+				+ (best < 0 ? "-（未命中）" : (best + 1).ToString())
+				+ " 行）：可用 " + available + " 台" + detail);
+		}
+		catch
+		{
+			// 诊断本身失败不影响玩法。
+		}
+	}
+
 	// ================================================================ 注册混合卡池
 
 	/// <summary>
@@ -1682,7 +2545,13 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			}
 			if (banks.ContainsKey(CustomBank))
 			{
-				return true;
+				// ★ 不再直接 return true：设置变化时本方法要**用新参数重建**同一个键。
+				//   重建是幂等的（整份替换字典条目），且只在 _bankOk=false 时被调用，
+				//   所以正常运行时每关最多进来一次，不会反复重建。
+				if (_rebuildCount > 0)
+				{
+					Log("重建混合卡池（应用新设置）…");
+				}
 			}
 
 			var plantList = new Godot.Collections.Array();
@@ -1719,7 +2588,7 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			if (zombieList.Count == 0) { Log("拿不到僵尸卡池 " + ZombieSrcBank + "。"); }
 
 			int repP, repZ;
-			Godot.Collections.Array mixed = BuildWeighted(plantList, zombieList, PlantChance,
+			Godot.Collections.Array mixed = BuildWeighted(plantList, zombieList, _plantChance,
 				out repP, out repZ);
 			if (mixed.Count == 0)
 			{
@@ -1739,7 +2608,7 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 				+ zombieList.Count + " 只；每张植物 x" + repP + "、每只僵尸 x" + repZ
 				+ " ⇒ 列表 " + mixed.Count + " 条，实际出植物概率 "
 				+ (realChance * 100).ToString("0.###") + "%（目标 "
-				+ (PlantChance * 100).ToString("0.#") + "%）；同类卡等概率；跳过 " + skipped + "；"
+				+ (_plantChance * 100).ToString("0.#") + "%）；同类卡等概率；跳过 " + skipped + "；"
 				+ "BOSS " + (AllowBossZombie ? "已含" : "已排除")
 				+ "、巨人 " + (AllowGargantuar ? "已含" : "已排除") + "。");
 			return true;
@@ -1821,7 +2690,7 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	/// 而列表顺序是固定的分类顺序（White→Gold→…），结果是**白卡、金卡被双倍加权**，
 	/// 彩卡/星卡/原版卡被砍掉约 40%。这与「完全随机」相悖，已废弃。
 	///
-	/// 实测（植物 325 / 僵尸 290、PlantChance = 0.65）：最优解 a=58、b=35，
+	/// 实测（植物 325 / 僵尸 290、出植物概率 = 0.65）：最优解 a=58、b=35，
 	/// 植物条目 18850 + 僵尸条目 10150 = 29000，出植物概率**正好 65.0000%**，
 	/// 且每张植物、每只僵尸的中奖率各自完全相同。
 	///
@@ -1969,7 +2838,11 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 		}
 	}
 
-	/// <summary>按开关过滤僵尸：BOSS / 巨人系列可分别关掉。</summary>
+	/// <summary>
+	/// 按开关过滤僵尸：BOSS / 巨人系列可分别关掉。
+	/// ★ 现在两项都是常量 true（始终允许），所以本方法恒返回 true；
+	///   保留这个结构是为了以后需要时能一处改回。
+	/// </summary>
 	private static bool IsZombieAllowed(string key)
 	{
 		if (!AllowBossZombie && key.IndexOf("Boss", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -2335,6 +3208,405 @@ public partial class RandomImitater : TowerDefensePlantImitater
 		try { Unregister(); } catch { }
 	}
 
+	// ------------------------------------------------ 彩色化（去掉产物的黑白滤镜）
+
+	/// <summary>
+	/// ★ 黑白是从哪来的（IL 证据）：
+	///   游戏自己的 <c>TowerDefensePlantImitater.Explode()</c> 在生成植物/僵尸之后，
+	///   会对新角色调用 <c>SetSpriteGroupShaderParameter("imitater", 1)</c>
+	///   （植物那条走 <c>CallDeferred</c>，僵尸是直接调用）。
+	///   而 <c>"imitater"</c> 是 <c>ShaderEffectComponent.ShaderEffectFlags</c> 里的
+	///   **第 16 位**（`..cctor` 里 `"imitater" → 16`），<c>ApplyEffectFlags()</c>
+	///   据此对每个精灵调 <c>AdobeAnimateSprite.SetRenderGrayscale(true)</c>
+	///   ⇒ 产物整体变黑白。
+	///
+	///   本 Mod 的 <see cref="RiExplode"/> 走的正是 <c>base.Explode()</c>，
+	///   所以同样继承了这层滤镜。后果是产物上所有依赖颜色区分的部件
+	///   （防具、变体等）都失去辨识度 ⇒ 提供「彩色化」开关来关掉这层滤镜。
+	///
+	/// ★ 该位是**纯视觉**效果，不参与任何玩法判定 ⇒ 关掉它对平衡零影响。
+	///
+	/// 做法：只清「本 Mod 抽出」的产物的这一位，**绝不碰官方模仿者的产物**。
+	/// 判定「属于我们」的依据是该角色**确实被置上过 imitater 位** ——
+	/// 普通角色永远不会带上这一位，所以不存在误伤。
+	/// </summary>
+
+	/// <summary>已确认属于本 Mod 的产物（按开关维持配色的角色）。</summary>
+	private static readonly List<TowerDefenseCharacter> _riProducts =
+		new List<TowerDefenseCharacter>();
+
+	/// <summary>_riProducts 的成员集合，用于 O(1) 去重判断。</summary>
+	private static readonly HashSet<TowerDefenseCharacter> _riProductSet =
+		new HashSet<TowerDefenseCharacter>();
+
+	/// <summary>
+	/// 变身当帧新出现、但尚未确认带上 imitater 位的角色 → 剩余观察帧数。
+	/// 之所以要观察：植物那条是 CallDeferred，置位发生在我们看到它之后的某一帧。
+	/// </summary>
+	private static readonly Dictionary<TowerDefenseCharacter, int> _riCandidates =
+		new Dictionary<TowerDefenseCharacter, int>();
+
+	/// <summary>
+	/// 变身前的「场上已有角色」快照 + 还要差集几帧。
+	///
+	/// ★ 为什么不是一个当帧差集就完事：<c>base.Explode()</c> 里植物走的是
+	///   <c>cfg.Plant(...)</c>、僵尸走 <c>Create()</c>+<c>AddChild</c>，
+	///   注册进注册表的时机（<c>_EnterTree</c>/<c>_Ready</c>）未必都在我们
+	///   取差集那一刻之前完成。留一个几十帧的观察窗，无论它当帧就注册还是
+	///   拖几帧才注册，都能被认出来，避免「有时彩色、有时仍然黑白」。
+	/// </summary>
+	private static HashSet<TowerDefenseCharacter> _riPendingBefore;
+	private static int _riPendingFrames;
+
+	/// <summary>
+	/// 取差集的兜底观察窗帧数。
+	///
+	/// ★ 正常情况下用不到：角色注册进 <c>_activeCharacters</c> 是在
+	///   <c>AddChild</c> → <c>_EnterTree</c> 里**同步**完成的，而
+	///   <c>cfg.Plant(...)</c> / <c>cfg.Create(...)</c> 本身也是同步调用
+	///   （被 <c>CallDeferred</c> 推迟的只有 <c>WakeUp</c> 和着色参数）。
+	///   所以 <c>base.Explode()</c> 返回时产物**已经在册**，当帧差集就能拿到。
+	///
+	///   这个小窗口只作兜底：万一将来版本把注册改成异步，还能认出来。
+	///   刻意开得很小（3 帧 ≈ 50ms），因为官方模仿者的 <c>Explode()</c> 会置
+	///   **同一个** imitater 位，窗口越大越可能把它的产物误判成本 Mod 的。
+	///   另外一旦当帧就认出了产物，窗口直接不启用（见 <see cref="BeginColorizeWatch"/>）。
+	/// </summary>
+	private const int ColorizeDiffFrames = 3;
+
+	/// <summary>
+	/// 候选等待「imitater 位被置上」的帧数。
+	/// 植物那条是 <c>CallDeferred</c>（帧末才执行），所以要留出余量。
+	/// </summary>
+	private const int ColorizeWatchFrames = 60;
+
+	/// <summary>迭代 _riCandidates 时用的暂存表（避免边遍历边改字典）。</summary>
+	private static readonly List<TowerDefenseCharacter> _riConfirmScratch =
+		new List<TowerDefenseCharacter>();
+
+	private static FieldInfo _riF_effectFlags;   // ShaderEffectComponent._effectFlags
+	private static int _riImitaterBit;           // "imitater" 对应的位（实测 16）
+	private static bool _riColorUnavailable;     // 反射失败 ⇒ 彻底放弃，不再白跑
+	private static bool _riColorReported;
+
+	/// <summary>
+	/// 读取角色当前的 imitater（黑白）位。成功返回 true。
+	/// 位号不写死，而是从游戏的 <c>ShaderEffectFlags</c> 字典里取 ⇒ 官方改位号也不会失效。
+	/// </summary>
+	private static bool TryReadImitaterFlag(TowerDefenseCharacter c, out bool on)
+	{
+		on = false;
+		try
+		{
+			if (_riColorUnavailable || c == null)
+			{
+				return false;
+			}
+			if (_riF_effectFlags == null)
+			{
+				FieldInfo sef = typeof(TowerDefenseCharacter).GetField("shaderEffectComponent",
+					BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+				if (sef == null)
+				{
+					_riColorUnavailable = true;
+					return false;
+				}
+				Type shType = sef.FieldType;
+				FieldInfo dictF = shType.GetField("ShaderEffectFlags",
+					BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+				FieldInfo efF = shType.GetField("_effectFlags",
+					BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+				if (dictF == null || efF == null)
+				{
+					_riColorUnavailable = true;
+					return false;
+				}
+				Dictionary<string, int> dict = dictF.GetValue(null) as Dictionary<string, int>;
+				int bit;
+				if (dict == null || !dict.TryGetValue("imitater", out bit) || bit == 0)
+				{
+					_riColorUnavailable = true;
+					return false;
+				}
+				_riImitaterBit = bit;
+				_riF_effectFlags = efF;
+			}
+
+			object comp = FindField(c, "shaderEffectComponent");
+			if (comp == null)
+			{
+				return false;
+			}
+			object raw = _riF_effectFlags.GetValue(comp);
+			if (raw is int flags)
+			{
+				on = (flags & _riImitaterBit) != 0;
+				return true;
+			}
+			return false;
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
+	/// <summary>把角色的黑白位设成 <paramref name="grayscale"/>（走游戏公开 API）。</summary>
+	private static void ApplyColorize(TowerDefenseCharacter c, bool grayscale)
+	{
+		try
+		{
+			c.SetSpriteGroupShaderParameter("imitater", grayscale);
+		}
+		catch
+		{
+			// 不许抛：纯视觉调整，失败就保持原样。
+		}
+	}
+
+	/// <summary>变身前拍一张「场上已有角色」的快照，用于事后取差集。</summary>
+	private static HashSet<TowerDefenseCharacter> SnapshotActiveCharacters()
+	{
+		var set = new HashSet<TowerDefenseCharacter>();
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return set;
+			}
+			TowerDefenseBattleCharacterRegistry reg = mgr.characterRegistry;
+			if (reg == null)
+			{
+				return set;
+			}
+			List<TowerDefenseCharacter> list = reg.GetActiveCharacters();
+			if (list == null)
+			{
+				return set;
+			}
+			for (int i = 0; i < list.Count; i++)
+			{
+				TowerDefenseCharacter c = list[i];
+				if (c != null)
+				{
+					set.Add(c);
+				}
+			}
+		}
+		catch
+		{
+		}
+		return set;
+	}
+
+	/// <summary>
+	/// 记下「变身前场上已有角色」，接下来若干帧持续取差集找出本次新生成的角色。
+	/// 见 <see cref="_riPendingBefore"/> 的注释：不能只做当帧差集。
+	/// </summary>
+	private static void BeginColorizeWatch(HashSet<TowerDefenseCharacter> before)
+	{
+		try
+		{
+			if (_riColorUnavailable || before == null)
+			{
+				return;
+			}
+			// ★ 先当帧取一次差集：正常路径下产物此刻已经在册，一次就够。
+			//   只有这次没找到任何新角色时才开兜底窗口 —— 这样绝大多数情况下
+			//   窗口是 0，既不会拖到下一帧，也不会误收官方模仿者的产物。
+			int found = DiffColorizeCandidates(before);
+			if (found > 0)
+			{
+				_riPendingBefore = null;
+				_riPendingFrames = 0;
+				return;
+			}
+			_riPendingBefore = before;
+			_riPendingFrames = ColorizeDiffFrames;
+		}
+		catch
+		{
+		}
+	}
+
+	/// <summary>
+	/// 取差集：把快照之后新出现、且**确实带上了 imitater 位**的角色确认为本 Mod 产物。
+	/// 带位的立即按开关处理（避免闪一下黑白）；还没带位的放进候选观察窗。
+	/// 返回本次新收下的产物数量。
+	/// </summary>
+	private static int DiffColorizeCandidates(HashSet<TowerDefenseCharacter> before)
+	{
+		int found = 0;
+		try
+		{
+			if (_riColorUnavailable || before == null)
+			{
+				return 0;
+			}
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return 0;
+			}
+			TowerDefenseBattleCharacterRegistry reg = mgr.characterRegistry;
+			if (reg == null)
+			{
+				return 0;
+			}
+			List<TowerDefenseCharacter> list = reg.GetActiveCharacters();
+			if (list == null)
+			{
+				return 0;
+			}
+			for (int i = 0; i < list.Count; i++)
+			{
+				TowerDefenseCharacter c = list[i];
+				if (c == null || before.Contains(c) || _riProductSet.Contains(c))
+				{
+					continue;
+				}
+				bool on;
+				if (TryReadImitaterFlag(c, out on) && on)
+				{
+					// 已经带位 ⇒ 确定是我们的产物，立即收下并按开关处理。
+					_riProducts.Add(c);
+					_riProductSet.Add(c);
+					found++;
+					ApplyColorize(c, !RandomImitaterEntry.ColorizeResult);
+				}
+				else if (!_riCandidates.ContainsKey(c))
+				{
+					_riCandidates[c] = ColorizeWatchFrames;
+				}
+			}
+		}
+		catch
+		{
+		}
+		return found;
+	}
+
+	/// <summary>入口的 `process_frame` 驱动：确认候选 + 按开关维持场上产物的配色。</summary>
+	internal static void TickAllColorize()
+	{
+		if (_riColorUnavailable)
+		{
+			return;
+		}
+		try
+		{
+			// ① 兜底观察窗内：继续取差集找出本次新生成的角色
+			if (_riPendingFrames > 0 && _riPendingBefore != null)
+			{
+				DiffColorizeCandidates(_riPendingBefore);
+				_riPendingFrames--;
+				if (_riPendingFrames <= 0)
+				{
+					_riPendingBefore = null;   // 观察结束，释放快照
+				}
+			}
+
+			// ② 确认候选：带上过 imitater 位的才算我们的产物
+			if (_riCandidates.Count > 0)
+			{
+				_riConfirmScratch.Clear();
+				foreach (KeyValuePair<TowerDefenseCharacter, int> kv in _riCandidates)
+				{
+					_riConfirmScratch.Add(kv.Key);
+				}
+				for (int i = 0; i < _riConfirmScratch.Count; i++)
+				{
+					TowerDefenseCharacter c = _riConfirmScratch[i];
+					if (c == null)
+					{
+						continue;   // 字典键不可能是 null，无从删除，跳过即可
+					}
+					if (!GodotObject.IsInstanceValid(c))
+					{
+						_riCandidates.Remove(c);
+						continue;
+					}
+					bool on;
+					if (TryReadImitaterFlag(c, out on) && on)
+					{
+						_riCandidates.Remove(c);
+						_riProducts.Add(c);
+						_riProductSet.Add(c);
+						continue;
+					}
+					int left;
+					if (_riCandidates.TryGetValue(c, out left))
+					{
+						if (left <= 1)
+						{
+							_riCandidates.Remove(c);   // 观察期结束仍未带位 ⇒ 不是模仿者产物
+						}
+						else
+						{
+							_riCandidates[c] = left - 1;
+						}
+					}
+				}
+			}
+
+			// ② 按当前开关维持配色（开=不要灰度，关=保持原生灰度）
+			if (_riProducts.Count > 0)
+			{
+				bool wantGray = !RandomImitaterEntry.ColorizeResult;
+				for (int i = _riProducts.Count - 1; i >= 0; i--)
+				{
+					TowerDefenseCharacter c = _riProducts[i];
+					if (c == null || !GodotObject.IsInstanceValid(c))
+					{
+						_riProducts.RemoveAt(i);   // 顺手回收失效引用
+						if (c != null)
+						{
+							_riProductSet.Remove(c);
+						}
+						continue;
+					}
+					bool on;
+					if (!TryReadImitaterFlag(c, out on))
+					{
+						continue;
+					}
+					if (on != wantGray)
+					{
+						ApplyColorize(c, wantGray);
+					}
+				}
+				if (!_riColorReported)
+				{
+					_riColorReported = true;
+					RandomImitaterEntry.LogStatic("彩色化已生效：本 Mod 抽出的植物/僵尸不再套用模仿者的黑白滤镜"
+						+ "（可在游戏内「Mod 管理 → 配置」里关闭，恢复原版黑白）。");
+				}
+			}
+		}
+		catch
+		{
+			// 不许抛：逐帧回调里抛出会打断整帧驱动。
+		}
+	}
+
+	/// <summary>卸载时清掉追踪表，避免把上一局的引用带到下一局。</summary>
+	internal static void ClearColorizeTracking()
+	{
+		try
+		{
+			_riProducts.Clear();
+			_riProductSet.Clear();
+			_riCandidates.Clear();
+			_riConfirmScratch.Clear();
+			_riPendingBefore = null;
+			_riPendingFrames = 0;
+		}
+		catch
+		{
+		}
+	}
+
 	/// <summary>「接管变身」的成功/失败日志只打一次（静态：全场所有实例共用，避免每株一行）。</summary>
 	private static bool _riLogged;
 
@@ -2461,6 +3733,21 @@ public partial class RandomImitater : TowerDefensePlantImitater
 	/// </summary>
 	private void RiExplode()
 	{
+		// 彩色化用：变身前先拍下场上已有角色，事后取差集就知道本次开出了什么。
+		// 放在 try 外也要能拿到，所以先算好。
+		HashSet<TowerDefenseCharacter> before = null;
+		try
+		{
+			if (!_riColorUnavailable)
+			{
+				before = SnapshotActiveCharacters();
+			}
+		}
+		catch
+		{
+			before = null;
+		}
+
 		try
 		{
 			// ① 腾位置：同步清掉 slot / characterSlotDictionary / characterList
@@ -2475,6 +3762,19 @@ public partial class RandomImitater : TowerDefensePlantImitater
 		catch
 		{
 			// 不许抛：变身回调里抛出会让战斗流程崩。
+		}
+
+		try
+		{
+			// ②.5 彩色化：开启一个观察窗，接下来几十帧持续取差集找出本次新生成的角色。
+			//      不能只做当帧差集 —— 角色注册进注册表的时机未必早于这一刻。
+			if (before != null)
+			{
+				BeginColorizeWatch(before);
+			}
+		}
+		catch
+		{
 		}
 
 		try
