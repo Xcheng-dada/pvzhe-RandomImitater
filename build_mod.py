@@ -73,7 +73,7 @@ CHAR_KEY = "RandomImitater"
 MOD_NAME = "随机模仿者"
 MOD_ID = "randomimitater"
 # 版本号单一来源：改这里就够了（mod.json 与 README 都以此为准）。
-MOD_VERSION = "1.6.0"
+MOD_VERSION = "1.9.1"
 CFG_FILE = "TowerDefensePlantRandomImitater.tres"
 SCENE_FILE = "RandomImitater.tscn"
 SPRITE_FILE = "RandomImitater.tscn"
@@ -104,6 +104,7 @@ PD = "完全随机的模仿者，惊喜和惊吓并存！"
 # ⚠️ 这里的百分比要和 src/RandomImitaterEntry.cs 的 PlantChance 保持一致（现在是 0.65）。
 PHD = ("[color=FF0000]获取方式[/color]：[color=0000cd]Mod 植物（无需解锁）[/color]\\n"
        "[color=0048FF]臻享钻卡：该植物价格通常固定，不受常规机制影响[/color]\\n"
+       "\\n"
        "韧性：[color=cc241d]1000[/color]\\n"
        "特点：[color=cc241d]65%概率开出随机植物 35%概率开出随机僵尸（敌对）[/color]\\n")
 
@@ -126,7 +127,6 @@ PHS = ("随机模仿者旋转着，宛如风暴般裹挟着植物与僵尸，随
 PI = ("在选卡界面「Mod 植物」或「钻卡」页签选中它，无需解锁。\n"
       "种下后随机开出植物（默认 65%）或敌对僵尸（默认 35%）。\n"
       "默认 0 阳光、冷却 7.5 秒、本体 1000 血。\n"
-      "本卡是钻卡：价格固定，不受市场僵尸等常规改价机制影响。\n"
       "属性与显示配置可在游戏内「Mod 管理 → 配置」里实时调整，保存即生效。")
 
 
@@ -183,18 +183,46 @@ def w(path, text):
 # ---------------- 资源内容 ----------------
 
 def cfg_tres():
-    # plantGridType = [2, 6, 5]（GROUND/POT/LILYPAD）= TowerDefenseCharacterConfig 的
-    # **默认值**，也就是「普通植物」的落位规则，效果与普通植物完全一致：
-    #   · 不许叠种模仿者（占住 slot[GROUND]，同类自然放不进）
-    #   · 花盆 / 睡莲 / 南瓜壳 / 咖啡豆：按普通植物的规则走（空位可放、有植物则按引擎判定）
-    #   · 墓碑、弹坑：不能种（与墓碑的拦截在 CanPacketPlant 的 FindPlantingBlocker，
-    #     弹坑靠收窄后不再走 ALL 早退，跟普通植物一样被拒）
-    #   · 会占格 ⇒ 不许叠种、容器按普通植物判定、墓碑/弹坑被拒
-    #     （注意：「能不能被僵尸咬」和占格**无关**，那是 ExplodeComponent.ProtectsFromBites
-    #      这道独立闸门决定的，由 src/RandomImitaterEntry.cs 里逐帧改组件字段打开）
+    # plantGridType = [2, 6, 5, 3, 1, 10, 8, 9]
+    #   （GROUND/POT/LILYPAD/WATER/SOIL/BRICK/GRAVESTONE/CRATER，顺序对齐官方
+    #    [2,6,3,5]、[2,6,5,3,10,1] 系「全地形」植物的写法）
+    # 这份列表要同时满足「全地形可种」和「已有实体植物必须拦住」两条，
+    # 逐条对应 CanPacketPlant 的判定（IL 见 .cache/cpp_method.txt）：
+    #   · IL_0d1c 第三轮 gridType 遍历：本格地形（cell.slot 的键，由 Init 按
+    #     cell.config.gridType 逐层预建，见 TowerDefenseCellInstance.Init IL_0080-009C）
+    #     里只要有一层被列表包含、且该层 slot 为空就直接放行 ⇒ 列表必须覆盖全部
+    #     地形层：GARDEN 裸地是 GROUND(2)/SOIL(1)/BRICK(10) 三层（Row1Create 实测
+    #     gridType=[2,4]、花盆系植物对 [2,1,10]），纯水格只有 WATER(3)；
+    #     1.7.0 只写 [2,6,5,8,9] ⇒ 裸地只剩被占的 2、水上压根没有 2 ⇒ 双双被拒。
+    #   · IL_0404 第一轮遍历：格上是墓碑且列表不含 8/4 ⇒ 拒；是弹坑且不含 4/9 ⇒ 拒。
+    #     含 GRAVESTONE(8)、CRATER(9) ⇒ 墓碑格与弹坑格都能种（这条不靠 AIR 绕）。
+    #   · 拦住实体植物靠的是 IL_0d1c 找不到空槽：CharacterPlant 登记时把植物塞进
+    #     其地形列表与格子相交的**每一个**空槽（cell_CharacterPlant.txt IL_0799），
+    #     豌豆占满 [2,1,10]、睡莲占 WATER(3) ⇒ 所有相交层皆满 ⇒ 走不到放行分支，
+    #     落到 IL_0d82 GetCharacterWhoHasGridType（只认 override≠0 的占位者，普通
+    #     植物 override=0）⇒ return false。
+    #   · 含 POT(6)/LILYPAD(5)：花盆 ov=6、睡莲 ov=5，IL_0d82 查到它们 ⇒ 返回非空
+    #     ⇒ 「花盆/睡莲上再种」放行。
+    #   ⚠️ 上面两条合起来有一个数据层面消不掉的漏洞：IL_0d82 一旦命中容器/载体就
+    #     **整体放行，不看同一格上还有没有别的植物**。于是「墓碑 + 一株种得进墓碑的
+    #     普通植物」这种格子照样亮：想放行空墓碑/空弹坑就得含 8/9，含了 8/9 就拦不住
+    #     这种叠种。补这道拦截走宿主扩展点 XWModHookPoints.PlantPlacement
+    #     （见 src/RandomImitaterEntry.cs 的 RegisterPlacementGate / BlockStackingPlanting），
+    #     它发生在扣阳光之前 ⇒ 否决时阳光不动、卡不进冷却。
+    #   · 不含 AIR(4)：浮空植物（咖啡豆 [4,12]）不占 GROUND 槽，靠 IL_0d1c 的
+    #     「GROUND 层为空」放行 ⇒ 咖啡伞在格上也照样种得下。反过来一旦把 4 写进
+    #     列表，IL_0d1c 永远能找到空的 AIR 槽 ⇒ 任何格子都放行，占用拦截失效。
+    #   · 不含 SURROUND(7)：南瓜壳走 characterSurround，plantCanHasSurround 默认 1
+    #     ⇒ IL_0395 不拦，无需写进列表。
+    #   · 不含 ICECAP(11)：没有植物的地形列表出现过 11（PCK 实测），写了也无从占槽。
+    #   · 植物本体占满相交层 ⇒ 第二个随机模仿者会被同一套判定拦下，不会自己叠自己。
     #
-    # ⚠️ 收窄必须和「自定义 Explode」一起上（见 src/RandomImitaterEntry.cs 的 RiExplode）。
-    #   旧版只收窄不改变身会 100% 出僵尸：`TowerDefensePlantImitater.Explode()` 校验植物
+    # 注：「能不能被僵尸咬」和占格**无关**，那是 ExplodeComponent.ProtectsFromBites
+    # 这道独立闸门决定的，由 src/RandomImitaterEntry.cs 里逐帧改组件字段打开。
+    #
+    # ⚠️ 这套地形列表必须和「自定义 Explode」一起上（见 src/RandomImitaterEntry.cs 的 RiExplode）。
+    #   旧版留 [-1]（ALL）会命中 IL_0172 的 `Contains(-1) ⇒ return true` 早退 ⇒ 任何格子都放行；
+    #   而 `TowerDefensePlantImitater.Explode()` 校验植物
     #   用的是模仿者**自己那格**（IL_00DB ldarg.0.cell → IL_00E5 CanPacketPlant），
     #   而那时本体还占着槽位 ⇒ 植物一律被拒 ⇒ IL_00EC `Remove` 掉重抽，僵尸分支不校验
     #   ⇒ 循环必然落到僵尸。现在 Explode 第一件事是 `Destroy(false)` 把自己腾走
@@ -218,7 +246,7 @@ homeWorld = 1
 costRise = -1
 cost = 0
 packetCooldown = 7.5
-plantGridType = [2, 6, 5]
+plantGridType = [2, 6, 5, 3, 1, 10, 8, 9]
 hitpoints = 1000
 collisionFlags = 11
 maskFlags = 9
@@ -311,7 +339,7 @@ def manifest():
         "version": MOD_VERSION,
         "author": "小橙c",
         "description": (
-            f"新增植物「{PN}」（钻卡）：种下后随机开出植物或僵尸"
+            f"新增植物「{PN}」（臻享钻卡）：种下后随机开出植物或僵尸"
             f"（默认 65% 开出随机植物，35% 开出随机僵尸·敌对）。"
             f"属性与显示配置可在游戏内「Mod 管理 → 配置」实时调整。"
         ),

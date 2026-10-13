@@ -45,10 +45,18 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	private const string P = "[RandomImitater] ";
 
 	/// <summary>本 Mod 新增的植物 key（= 目录名 = 场景名 = config.name = packet.saveKey）。</summary>
-	private const string MyKey = "RandomImitater";
+	internal const string MyKey = "RandomImitater";
 
 	/// <summary>运行时注册的混合卡池名 —— 新植物场景里的 `packetBank` 指向它。</summary>
 	private const string CustomBank = "RandomImitaterMixed";
+
+	/// <summary>
+	/// 当前这版混合卡池里的**植物** key 名单（由 <c>EnsureMixedBank</c> 在注册成功后刷新）。
+	/// `RandomImitater.RiExplode` 据此在变身窗口内临时放宽这些植物的地形要求，
+	/// 让「本格种不下的植物」不会被原生重抽循环剔掉（见该方法的注释）。
+	/// </summary>
+	internal static readonly HashSet<string> PoolPlantKeys =
+		new HashSet<string>(StringComparer.Ordinal);
 
 	/// <summary>植物卡来源卡池（干净的全植物池，不含保龄球等特殊卡）。</summary>
 	private const string PlantSrcBank = "GeneralPlant";
@@ -69,7 +77,22 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 	///   （设置键 <see cref="KeyPlantChance"/>，int 百分比 0~100）。
 	///   改完立刻生效：本 Mod 每帧比对一次，变化就重建混合卡池（见 DriveSettingsWatch）。
 	///
-	/// ✅ 现在 `plantGridType` 收窄成 [2,6,5]（和普通植物一致）也照样生效：
+	/// ✅ `plantGridType = [2,6,5,3,1,10,8,9]`（GROUND/POT/LILYPAD/WATER/SOIL/BRICK/GRAVESTONE/CRATER）：
+	///   · 格子的地形是**多层**的（cell.slot 的键 = config.gridType，Init 里逐层建槽），
+	///     草地是 GROUND(2)、泥地是 SOIL(1)、砖地是 BRICK(10)、水面是 WATER(3)，
+	///     所以列表必须把全部地面层都写进去，缺一个那种地形就种不下去（1.7.0 漏了 1/3/10）。
+	///   · IL_0d1c 的第三轮遍历：本格任意一层被列表包含且槽位为空就放行 ⇒ 裸地/水面/泥地/砖地都能种。
+	///   · IL_0404 的第一轮遍历遇墓碑含 8、遇弹坑含 9 ⇒ 都能下。
+	///   · IL_0d82 收尾调用 GetCharacterWhoHasGridType，只认 override != 0 且落在列表里的占位者；
+	///     POT/LILYPAD 的 override 是 6/5，命中则放行 ⇒ 容器上可再种；普通植物 override=0 且
+	///     占满其地形列表与本格相交的全部槽位 ⇒ 拦得住。
+	///   ⚠️ 但这条「拦得住」在**格上同时站着地形载体**时会失效：墓碑(8)/弹坑(9)的 override
+	///     也落在本列表里，IL_0d82 一命中就整体放行，不看同一格上还有没有别的植物
+	///     ⇒ 空墓碑要放行就必须含 8/9，含了 8/9 就拦不住叠种，数据层面无解。
+	///     补上这道拦截的是 <c>RegisterPlacementGate</c>：走宿主的种植扩展点，
+	///     在宿主结论之上追加「这格已站着实体植物 ⇒ 否决」。
+	///   · AIR(4) 不写进列表：浮空咖啡豆 (override=0) 不占 GROUND 槽，靠 IL_0d1c 的空槽判断放行 ⇒ 咖啡伞在格上也种得下，
+	///     同时避免「任何格子因 AIR 而强制通过」导致实体植物无法拦截。
 	/// 自定义的 `RandomImitater.RiExplode()` 会**先把自己从格子上腾走**
 	/// （`Destroy(false)` 同步清空 slot），再交给基类抽卡/落点校验，
 	/// 所以校验看到的一格是空地，植物不会被自己挡掉。
@@ -414,7 +437,10 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 				Log("拿不到 Mod 配置（将一直使用默认值）：" + ex.Message);
 			}
 			ReadSettings(true);
-			Log("初始化完成；PackageRoot=" + root + "。种下后将从植物+僵尸混合卡池里随机开出。");
+			RegisterPlacementGate(context);
+			Log("初始化完成；PackageRoot=" + root + "。种下后将从植物+僵尸混合卡池里随机开出"
+				+ (_placementGateOk ? "；占用格拦截已接上宿主扩展点。"
+				                    : "；占用格拦截未接上宿主扩展点，按原生地形规则判定。"));
 		}
 		catch (Exception ex)
 		{
@@ -465,6 +491,290 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			_started = false;
 			try { RandomImitater.ClearColorizeTracking(); } catch { }
 		}
+	}
+
+	// ================================================================ 种植闸门
+
+	/// <summary>种植扩展点是否接上了（只报一次，见 <c>Initialize</c> 的日志）。</summary>
+	private bool _placementGateOk;
+
+	/// <summary>
+	/// 接宿主的「种植许可」扩展点：<c>XWModHookPoints.PlantPlacement</c>。
+	///
+	/// 为什么必须走这一步，光靠 <c>plantGridType</c> 的数据表达不了：
+	/// 一次放行要经过 <c>TowerDefenseCellInstance.CanPacketPlant</c>，它最后两道闸门是
+	///   · IL_0d1c：本格**任意一层**地形在列表里、且那一层槽位空 ⇒ 放行；
+	///   · IL_0d82：<c>GetCharacterWhoHasGridType</c> 只要找到一个「占位者的
+	///     plantGridOverrideType 落在自己列表里」的角色 ⇒ **无条件放行**。
+	/// 而墓碑(8)/弹坑(9)/花盆(6)/睡莲(5)这些「地形载体」正是 override≠0 的角色。
+	/// 于是格上只要站着这么一位载体，它就把判定整体点亮，**完全不看同一格上还
+	/// 有没有别的植物** ⇒ 墓碑格上已经种了一株普通植物时，随机模仿者照样落得下去
+	/// （叠种）。要放行空墓碑格就得含 8/9，含了 8/9 就拦不住叠种 ⇒ 数据层面无解。
+	///
+	/// 接法用 <c>After</c>。这个扩展点是宿主专门留给 Mod 的**种植许可闸门**：
+	/// <c>ModAllowsPlacement</c> 递给调度器的「原操作」是常量 <c>true</c>
+	/// （IL_0051 → <c>&lt;&gt;c.&lt;ModAllowsPlacement&gt;b__112_0</c> = <c>ldc.i4.1; ret</c>），
+	/// 也就是说宿主自己的地形判定并不在这里，这里纯粹是「Mod 有没有话要说不」。
+	/// 因此 <c>After</c> 拿到的入参是**链上前面其它 Mod 的结论**：
+	///   · 不是本 Mod 的卡 ⇒ 立刻原样交回，别的 Mod 的结论一律不改；
+	///   · 前面有别的 Mod 否决过 ⇒ 继续是否决（只在 true 时才追加否决 ⇒ 只会更严不会更松）；
+	///   · 拿不到 / 抛异常 ⇒ 原样返回 true，退化成今天的行为，不报错不崩。
+	/// 地形式样能不能种仍由 <c>CanPacketPlant</c> 在别处把关，这里只补它表达不了的
+	/// 「叠种」这一条 ⇒ 其它植物的落点规则一点没变。
+	///
+	/// ★ 时机正好：这个扩展点在 <c>TowerDefenseInGamePacketShow.Plant</c> 里是
+	///   IL_0041 调用，**早于** IL_00A3 扣阳光。否决 ⇒ 阳光不动、卡不进冷却、
+	///   不落任何角色，和普通「这格种不下」一模一样。
+	/// ★ 变身时开出的植物/僵尸不受影响：那条路走 <c>TowerDefensePacketConfig.Plant</c>，
+	///   不经过卡片层，也就不会回调这里。
+	/// </summary>
+	private void RegisterPlacementGate(XWModRuntimeContext context)
+	{
+		_placementGateOk = false;
+		if (context == null)
+		{
+			return;
+		}
+		try
+		{
+			context.Hooks.After(
+				XWModHookPoints.PlantPlacement,
+				MyKey + ".placement-gate",
+				new Func<XWModPlantPlacementRequest, bool, bool>(BlockStackingPlanting));
+			_placementGateOk = true;
+		}
+		catch (Exception ex)
+		{
+			// 接不上就退回「按地形数据判定」，功能整体仍可用（只是拦不住叠种）。
+			Log("种植扩展点没接上（叠种拦截不生效）：" + ex.Message);
+		}
+	}
+
+	/// <summary>
+	/// 种植许可回调：宿主的结论为 true 时，再检查「这一格是否已站着别的实体植物」。
+	/// </summary>
+	private static bool BlockStackingPlanting(
+		XWModPlantPlacementRequest request, bool hostAllows)
+	{
+		if (!hostAllows)
+		{
+			return false;   // 链上前面已有 Mod 否决 ⇒ 原样交回，不改别人的结论
+		}
+		try
+		{
+			if (request == null)
+			{
+				return true;
+			}
+			// Packet 是卡片（宿主把 this 传进来的），只处理我们自己的那张卡。
+			TowerDefenseInGamePacketShow card =
+				request.Packet as TowerDefenseInGamePacketShow;
+			if (card == null || !GodotObject.IsInstanceValid(card) || !IsMyCard(card))
+			{
+				return true;
+			}
+			TowerDefenseCellInstance cell = TowerDefenseManager.GetMapCell(request.Cell);
+			if (cell == null || !GodotObject.IsInstanceValid(cell))
+			{
+				return true;
+			}
+			return !HasGroundPlantOccupant(cell);
+		}
+		catch
+		{
+			// 不许抛：扩展点里抛出会被宿主记成「故障 Mod」并摘掉我们的全部注册。
+			return true;
+		}
+	}
+
+	/// <summary>浮空层（咖啡豆那类不占地面格的植物）。</summary>
+	private const TowerDefenseEnum.PLANTGRIDTYPE GridAir = TowerDefenseEnum.PLANTGRIDTYPE.AIR;
+
+	/// <summary>围壳层（南瓜壳那类套在别人外面的植物）。</summary>
+	private const TowerDefenseEnum.PLANTGRIDTYPE GridSurround =
+		TowerDefenseEnum.PLANTGRIDTYPE.SURROUND;
+
+	/// <summary>「没有自己的地形身份」，即普通植物；≠0 的是花盆/睡莲/墓碑/弹坑这类地形载体。</summary>
+	private const TowerDefenseEnum.PLANTGRIDTYPE GridNoone =
+		TowerDefenseEnum.PLANTGRIDTYPE.NOONE;
+
+	/// <summary>
+	/// 这一格里是否站着「会占住这格的普通植物」。
+	///
+	/// 排除项与玩家的口径一致：
+	///   · <c>plantGridOverrideType != NOONE</c>：花盆(6)/睡莲(5)/墓碑(8)/弹坑(9) 这些
+	///     「地形载体」不算植物，格上只有它们时照样能种；
+	///   · 地形列表含 AIR(4)：浮空植物（咖啡豆 [4,12]）不占地面格；
+	///   · 地形列表含 SURROUND(7)：南瓜壳那类围壳，本来就是套在别人外面的；
+	///   · 非 <c>TowerDefensePlantConfig</c>：僵尸、地面物件、道具护盾不参与；
+	///   · 正在死亡 / 全息投影 / 已被铲掉的角色不参与（口径照抄 <c>CanPacketPlant</c>）。
+	/// 其余任何一株植物 ⇒ 这格已经被占住 ⇒ 拦下叠种。
+	/// </summary>
+	private static bool HasGroundPlantOccupant(TowerDefenseCellInstance cell)
+	{
+		List<TowerDefenseCharacter> list = cell.characterList;
+		if (list == null)
+		{
+			return false;
+		}
+		TowerDefenseCharacter shield = cell.itemShield;
+		for (int i = 0; i < list.Count; i++)
+		{
+			TowerDefenseCharacter o = list[i];
+			if (o == null || !GodotObject.IsInstanceValid(o) || o.isDestroy || o.isShovel)
+			{
+				continue;
+			}
+			// 道具护盾（口径同私有方法 IsCurrentItemShield：是护盾类或与 itemShield 同一对象）
+			if (o is TowerDefenseItemSheild || ReferenceEquals(o, shield))
+			{
+				continue;
+			}
+			TowerDefenseCharacterInstance inst = o.instance;
+			if (inst == null || !GodotObject.IsInstanceValid(inst)
+				|| inst.hologram || inst.die)
+			{
+				continue;
+			}
+			TowerDefenseCharacterConfig cfg = o.config;
+			if (cfg == null || !GodotObject.IsInstanceValid(cfg))
+			{
+				continue;
+			}
+			if (!(cfg is TowerDefensePlantConfig))
+			{
+				continue;
+			}
+			if (cfg.plantGridOverrideType != GridNoone)
+			{
+				continue;   // 地形载体
+			}
+			Godot.Collections.Array<TowerDefenseEnum.PLANTGRIDTYPE> grid =
+				cfg.plantGridType;
+			if (grid == null)
+			{
+				continue;
+			}
+			if (grid.Contains(GridAir) || grid.Contains(GridSurround))
+			{
+				continue;
+			}
+			return true;
+		}
+		return false;
+	}
+
+	// ================================================================ 种植残影
+
+	/// <summary>
+	/// 逐帧抹掉「其实种不下去」的可种植残影。
+	///
+	/// 落点上那层半透明残影由 <c>PacketPickControl.ProcessPacketPickCore</c> 决定：
+	/// 它只问 <c>TowerDefenseCellInstance.CanPacketPlant</c>（IL_0557），**不会**经过
+	/// <c>XWModHookPoints.PlantPlacement</c> 那个 Mod 扩展点 ⇒ 接在那儿的叠种拦截
+	/// 拦得住落地、拦不住残影，于是出现「影子上得去、真身种不上」的误导画面。
+	///
+	/// 宿主另有一条 <c>XWModPlantPlacementService.Reserve/Release</c> 可让
+	/// <c>CanPacketPlant</c> 直接否决，但走不通：一是这几个成员在宿主程序集里不是
+	/// public，二是预留**整格**生效，会把南瓜壳套植物这类本该正常的落点一起堵死。
+	///
+	/// 所以按宿主自己的节奏补一刀：残影每帧重画（同一次调用开头 IL_00c8 先把
+	/// <c>plantSpriteList</c> 逐个设不可见，通过校验后 IL_0799 再把第 0 个设可见），
+	/// 我们就在每帧末尾用**同一个判据**（<see cref="HasGroundPlantOccupant"/>，
+	/// 与 <see cref="BlockStackingPlanting"/> 完全一致）把残影关掉 ⇒ 影子和落地
+	/// 许可始终同步：别处该有影子的地方一个不少，拦下的那一格一个不多。
+	///
+	/// ★ 只在扩展点确实接上时才做：接不上就没有拦截，那格是真能种的，藏影子反而是错的。
+	/// ★ 只碰本卡的残影，别的卡与别的 Mod 的落点预览一概不动。
+	/// </summary>
+	private void DrivePlacementGhost()
+	{
+		if (!_placementGateOk)
+		{
+			return;
+		}
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+			{
+				return;
+			}
+			PacketPickControl ppc = mgr.GetPacketPickControl();
+			if (ppc == null || !GodotObject.IsInstanceValid(ppc))
+			{
+				return;
+			}
+			// 拿到「本卡 + 光标所指那一格」；返回 false 表示这帧没什么可管的。
+			if (!HoverCellHoldsGroundPlant(mgr, ppc))
+			{
+				return;
+			}
+			List<AdobeAnimateSprite> sprites = ppc.plantSpriteList;
+			if (sprites == null)
+			{
+				return;
+			}
+			for (int i = 0; i < sprites.Count; i++)
+			{
+				AdobeAnimateSprite sprite = sprites[i];
+				if (sprite != null && GodotObject.IsInstanceValid(sprite))
+				{
+					sprite.Visible = false;
+				}
+			}
+		}
+		catch
+		{
+			// 每帧逻辑：静默跳过，不影响种植本身。
+		}
+	}
+
+	/// <summary>
+	/// 本卡持在手上时，光标指着的那一格上是否有会被拦截的实体植物。
+	/// 返回 false 表示「这帧不用管残影」：没持卡、不在选卡状态、指针不在地图上、
+	/// 或那一格本来就能种。
+	///
+	/// 取格口径照抄宿主 <c>TowerDefenseBattleFeatureMap.ProcessInput</c>：
+	/// 视口鼠标坐标 → 画布逆变换成世界坐标（IL_00e7-IL_00f1）→ 世界坐标换格号
+	/// （IL_00fb）→ 格号取格子（IL_0104）。宿主那份带一帧缓存，我们每帧自己算，
+	/// 结果一致且不受缓存时机影响。
+	/// </summary>
+	private static bool HoverCellHoldsGroundPlant(
+		TowerDefenseManager mgr, PacketPickControl ppc)
+	{
+		if (!mgr.IsGameRunning())
+		{
+			return false;
+		}
+		TowerDefenseInGamePacketShow card = ppc.packetPick;
+		if (card == null || !GodotObject.IsInstanceValid(card) || !IsMyCard(card))
+		{
+			return false;
+		}
+		TowerDefenseMapControl mapControl = ppc.mapControl;
+		if (mapControl == null || !GodotObject.IsInstanceValid(mapControl))
+		{
+			return false;
+		}
+		Godot.Viewport viewport = mapControl.GetViewport();
+		if (viewport == null || !GodotObject.IsInstanceValid(viewport))
+		{
+			return false;
+		}
+		Vector2 world = mapControl.GetCanvasTransform().AffineInverse()
+			* viewport.GetMousePosition();
+		Vector2I cellPos = mgr.GetMapGridPosFromMouse(world);
+		if (!mgr.CheckMapGridPosIn(cellPos))
+		{
+			return false;
+		}
+		TowerDefenseCellInstance cell = TowerDefenseManager.GetMapCell(cellPos);
+		if (cell == null || !GodotObject.IsInstanceValid(cell))
+		{
+			return false;
+		}
+		return HasGroundPlantOccupant(cell);
 	}
 
 	// ================================================================ 每帧
@@ -520,6 +830,8 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			// 逐帧清掉游戏给「本 Mod 抽出」的产物加的黑白滤镜（彩色化开关为开时）。
 			// 必须逐帧做：植物那条路径是 CallDeferred，会晚于我们设置 ⇒ 只设一次会被盖掉。
 			RandomImitater.TickAllColorize();
+			// 抹掉「其实种不下去」的可种植残影（必须逐帧：影子每帧由宿主重画）。
+			DrivePlacementGhost();
 		}
 		catch (Exception ex)
 		{
@@ -2741,6 +3053,19 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			data.category["Original"] = new Godot.Collections.Array();   // 留空：不回落到原版卡
 			banks[CustomBank] = data;
 
+			// 记下这一版卡池里的植物 key：`RiExplode` 要按这份名单做「地形临时放宽」
+			// （见 RandomImitater.WidenPoolPlants 的注释）。必须在重建成功后同步更新，
+			// 否则玩家改了概率导致卡池重建后，放宽的还是上一版的植物。
+			PoolPlantKeys.Clear();
+			foreach (Variant v in plantList)
+			{
+				string k = v.AsString();
+				if (!string.IsNullOrEmpty(k))
+				{
+					PoolPlantKeys.Add(k);
+				}
+			}
+
 			int plantEntries = plantList.Count * repP;
 			int zombieEntries = zombieList.Count * repZ;
 			double realChance = mixed.Count > 0 ? (double)plantEntries / mixed.Count : 0.0;
@@ -3894,10 +4219,24 @@ public partial class RandomImitater : TowerDefensePlantImitater
 			//    （freeInstance = false ⇒ 不立即 QueueFree，节点还要用于收尾；与官方一致）
 			Destroy(false);
 
-			// ② 抽卡 + 落点校验 + 种下/生成，全部交给基类原逻辑：
-			//    它读的就是本 Mod 运行时注册的混合卡池 packetBank，行为与今天完全一致，
-			//    只是现在校验看到的是**空格子**，植物不会再被自己挡掉。
-			base.Explode();
+			// ①.5/③ 放宽只在 base.Explode() 这一句里有效，成对放在同一个 try/finally
+			//        内，保证任何异常路径都会还原（不会留下「永久放宽」的脏配置）。
+			//      不做这一步的话，原生重抽循环会把本格种不下的植物**永久剔除**后再抽
+			//      （`TowerDefensePlantImitater.Explode()` IL_00EC `Array.Remove`），
+			//      僵尸那一支不校验 ⇒ 墓碑格/弹坑格上出僵尸的概率会从 35% 涨到接近 70%。
+			try
+			{
+				WidenPoolPlants();
+
+				// ② 抽卡 + 落点校验 + 种下/生成，全部交给基类原逻辑：
+				//    它读的就是本 Mod 运行时注册的混合卡池 packetBank，行为与今天完全一致，
+				//    只是现在校验看到的是**空格子**，植物不会再被自己挡掉。
+				base.Explode();
+			}
+			finally
+			{
+				RestorePoolPlants();
+			}
 		}
 		catch
 		{
@@ -3936,6 +4275,219 @@ public partial class RandomImitater : TowerDefensePlantImitater
 			// 静默
 		}
 	}
+
+	/// <summary>
+	/// ★ 「地形临时放宽」的实现（对应 <c>RiExplode</c> 里的 ①.5/③）。
+	///
+	/// ── 要解决的问题 ──
+	/// 原生 <c>TowerDefensePlantImitater.Explode()</c> 的抽卡循环是：
+	///   抽到植物 → <c>cell.CanPacketPlant(那张植物自己的配置)</c> 判 false
+	///            → <c>Array.Remove(该条目)</c> 后**重新抽**（永久剔除）；
+	///   抽到僵尸 → 不校验，直接生成。
+	/// 于是「本格种得下的植物」越少，植物条目被剔得越干净，结果就越偏僵尸。
+	/// 实测（PCK 138 个植物配置）：草地格还能种 74% 的植物 ⇒ 出僵尸约 42%；
+	/// 纯水格约 51% ⇒ 约 51%；墓碑格/弹坑格只剩 24% ⇒ 约 69%。
+	/// 玩家看到的会是「说明写 65:35，墓碑上却几乎必出僵尸」。
+	///
+	/// ── 做法 ──
+	/// 变身前后各做一次：把卡池里**每张植物**的 <c>plantGridType</c> 临时并上
+	/// 「随机模仿者自己的地形列表」（同一份地形口径 ⇒ 模仿者能种的格子，
+	/// 卡池里的植物就一定能种，重抽循环一次都不会命中剔除分支）。
+	/// 之所以是这两份列表而不是本格的地形层：IL_0404 要求格上是墓碑时列表必须含
+	/// GRAVESTONE(8)、是弹坑时必须含 CRATER(9)，直接借本格地形层反而不含这两项。
+	///
+	/// ── 为什么这样不会污染游戏其它部分 ──
+	///   · 抽卡走 <c>TowerDefenseManager.GetPacketConfig(key)</c>，IL_0175 起
+	///     <c>Resource.Duplicate(true)</c> ⇒ 校验/落地用的是**深拷贝**；
+	///     还原共享配置之后，本次落地的判定依据仍留在拷贝里，两不相干。
+	///   · 放宽窗口只包住 <c>base.Explode()</c> 这一个同步调用，中间不插自己的
+	///     逻辑 ⇒ 不存在「玩家恰好在这半句话里种花」的时机（游戏是单线程帧循环）。
+	///   · 铲掉/死亡时槽位靠 <c>CharacterDestroy</c> IL_013E、<c>RemoveCharacter</c>
+	///     IL_013E 末尾**按对象身份**遍历 slot 键置空来释放，不看植物的地形列表 ⇒
+	///     放宽种下的植物不会漏槽，也不会让后续植物叠上来。
+	///   · 存档侧 <c>_LoadCellInto</c> 是把 <c>slot</c> 按存进去的键值原样写回
+	///     （IL_02B1-IL_0370），不重新按地形推导 ⇒ 不会因为放宽而读档丢植物。
+	///
+	/// ★ 反射失败/配置找不到时一律**静默放弃**：最坏退化成「和原生模仿者一样
+	///   在某些地形更容易出僵尸」，不会报错、不会崩、也不会把卡池写坏。
+	/// </summary>
+	private void WidenPoolPlants()
+	{
+		try
+		{
+			_widenDepth++;
+			if (_widenDepth > 1)
+			{
+				// 同一帧里第二株模仿者也在变身：外层已经放宽过了，这里只加计数，
+				// 避免内层提前把表还原、外层还以为处于放宽状态。
+				return;
+			}
+			Godot.Collections.Array<TowerDefenseEnum.PLANTGRIDTYPE> want = RiTerrainList();
+			if (want == null)
+			{
+				return;
+			}
+			foreach (string key in RandomImitaterEntry.PoolPlantKeys)
+			{
+				if (string.IsNullOrEmpty(key))
+				{
+					continue;
+				}
+				try
+				{
+					// 必须是 ReadOnly 那份：GetPacketConfig 返回深拷贝，改它等于没改。
+					TowerDefensePacketConfig pc
+						= TowerDefenseManager.GetPacketConfigReadOnly(key);
+					if (pc == null || !GodotObject.IsInstanceValid(pc))
+					{
+						continue;
+					}
+					if (!(pc.characterConfig is TowerDefensePlantConfig plant))
+					{
+						continue;   // 卡池名字对不上植物配置 ⇒ 不动
+					}
+					if (!GodotObject.IsInstanceValid(plant))
+					{
+						continue;
+					}
+					Godot.Collections.Array<TowerDefenseEnum.PLANTGRIDTYPE> cur
+						= plant.plantGridType;
+					if (cur == null)
+					{
+						continue;
+					}
+					// ★ 防御：万一卡池里混进了本卡自己（或任何与 want 同一实例的配置），
+					//   `cur` 和 `want` 就是同一个数组 ⇒ 边遍历 want 边 Add 会死循环。
+					if (ReferenceEquals(cur, want)
+						|| string.Equals(key, RandomImitaterEntry.MyKey, StringComparison.Ordinal))
+					{
+						continue;
+					}
+					// 原本含 ALL(-1) 的卡本来就哪都能种，跳过 ⇒ 少写一份，
+					// 也避免 restore 之后行为漂移（它原来就不需要放宽）。
+					if (cur.Contains(RiTerrainAll))
+					{
+						continue;
+					}
+					List<TowerDefenseEnum.PLANTGRIDTYPE> saved
+						= new List<TowerDefenseEnum.PLANTGRIDTYPE>(cur.Count);
+					foreach (TowerDefenseEnum.PLANTGRIDTYPE g in cur)
+					{
+						saved.Add(g);
+					}
+					bool added = false;
+					foreach (TowerDefenseEnum.PLANTGRIDTYPE g in want)
+					{
+						if (!cur.Contains(g))
+						{
+							cur.Add(g);
+							added = true;
+						}
+					}
+					if (added)
+					{
+						_widened[key] = saved;   // 记下原样，restore 用整表覆盖回去
+					}
+				}
+				catch
+				{
+					// 单张卡失败不影响其它卡
+				}
+			}
+		}
+		catch
+		{
+			// 不许抛
+		}
+	}
+
+	/// <summary>把 <see cref="WidenPoolPlants"/> 改过的配置整表还原。</summary>
+	private void RestorePoolPlants()
+	{
+		if (_widenDepth > 0)
+		{
+			_widenDepth--;
+		}
+		if (_widenDepth > 0)
+		{
+			return;   // 还有别株模仿者在这个放宽窗口里，等最外层那一次再还原
+		}
+		if (_widened.Count == 0)
+		{
+			return;
+		}
+		foreach (KeyValuePair<string, List<TowerDefenseEnum.PLANTGRIDTYPE>> kv in _widened)
+		{
+			try
+			{
+				TowerDefensePacketConfig pc
+					= TowerDefenseManager.GetPacketConfigReadOnly(kv.Key);
+				if (pc == null || !GodotObject.IsInstanceValid(pc))
+				{
+					continue;
+				}
+				if (!(pc.characterConfig is TowerDefensePlantConfig plant)
+					|| !GodotObject.IsInstanceValid(plant))
+				{
+					continue;
+				}
+				Godot.Collections.Array<TowerDefenseEnum.PLANTGRIDTYPE> cur
+					= plant.plantGridType;
+				if (cur == null)
+				{
+					continue;
+				}
+				cur.Clear();
+				foreach (TowerDefenseEnum.PLANTGRIDTYPE g in kv.Value)
+				{
+					cur.Add(g);
+				}
+			}
+			catch
+			{
+				// 单张还原失败不阻断其余
+			}
+		}
+		_widened.Clear();
+	}
+
+	/// <summary>
+	/// 随机模仿者自己那份地形列表（= 打包进 .tres 的 <c>plantGridType</c>）。
+	/// 拿它当「放宽口径」的唯一来源，避免这里再抄一遍常量跟 .tres 走偏。
+	/// </summary>
+	private static Godot.Collections.Array<TowerDefenseEnum.PLANTGRIDTYPE> RiTerrainList()
+	{
+		try
+		{
+			TowerDefensePacketConfig mine
+				= TowerDefenseManager.GetPacketConfigReadOnly(RandomImitaterEntry.MyKey);
+			if (mine == null || !GodotObject.IsInstanceValid(mine))
+			{
+				return null;
+			}
+			if (!(mine.characterConfig is TowerDefensePlantConfig pc))
+			{
+				return null;
+			}
+			return pc.plantGridType;
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	/// <summary><c>PLANTGRIDTYPE.ALL</c>（= -1）：本来就全地形可种的卡不需要放宽。</summary>
+	private const TowerDefenseEnum.PLANTGRIDTYPE RiTerrainAll
+		= (TowerDefenseEnum.PLANTGRIDTYPE)(-1);
+
+	/// <summary>放宽过的植物 key → 它原本的 plantGridType 整表（还原用）。</summary>
+	private static readonly Dictionary<string, List<TowerDefenseEnum.PLANTGRIDTYPE>>
+		_widened = new Dictionary<string, List<TowerDefenseEnum.PLANTGRIDTYPE>>(
+			StringComparer.Ordinal);
+
+	/// <summary>放宽的嵌套计数：只有回到 0 才真正还原（见 <c>WidenPoolPlants</c>）。</summary>
+	private static int _widenDepth;
 
 	/// <summary>逐级遍历基类找私有字段值（C# 默认不查基类自己声明的 private 字段）。</summary>
 	private static object FindField(object target, string name)
