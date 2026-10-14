@@ -490,7 +490,195 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 		{
 			_started = false;
 			try { RandomImitater.ClearColorizeTracking(); } catch { }
+			// 本 Mod 关掉时若还压着 BOSS战 BGM，把关卡原曲放回去。
+			try { RestoreBossBgm("卸载"); } catch { }
 		}
+	}
+
+	// ================================================================ BOSS战 BGM
+
+	/// <summary>
+	/// 抽出的 BOSS 还活着时，背景音乐压成「BOSS战」（BrainiacManiac）。
+	///
+	/// 游戏本体**没有**「BOSS 出场换曲」这回事：`TowerDefenseBattleFeatureBGM` 只在
+	/// 关卡生命周期（`GameEntry/GameStart/GameReady/GameFail/Destroy`）里被调用，
+	/// 放哪首完全由关卡的 `backgroundMusic` 决定；BOSS 出场只播音效
+	/// （`HydraulicShort`/`Hydraulic`，见 `TowerDefenseZombieBoss.SpawnEntered`）。
+	/// 编辑器「背景音乐」下拉里那一项显示为「BOSS战」，对应配置
+	/// `translate = BGM_BRAINIAC_MANIAC`、战斗曲 `flag1 = BrainiacManiac`
+	/// （音频键 = `Asset/Audio/BGM/BrainiacManiac.ogg`）。
+	/// 所以这里由本 Mod 自己接上：抽到 BOSS 就切，BOSS 死光再切回。
+	///
+	/// ★ 只认游戏自己当作 BOSS 的那三个类 —— `TowerDefenseBossHealthBarManager`
+	///   只登记 `ZombieBoss` / `ZombieBossDave` / `ZombieBossEdgarII`（三套图标与颜色），
+	///   走的是普通僵尸血条的**巨人**一家（`TowerDefenseZombieGargantuarBase` 及
+	///   其十几个变体）不算 BOSS ⇒ 不在切换之列。
+	/// ★ 关卡本身就在放这首时整条逻辑跳过：已经在放，再切等于自己盖自己。
+	/// ★ 切回走宿主自己的 `GameStart()`（它内部 `StopBGM` + 放 `flag1` + 起鼓层），
+	///   因此原曲**从开头重播**，Godot 侧没有保留原进度可续。
+	/// </summary>
+	private const string BossBgmTrack = "BrainiacManiac";
+
+	/// <summary>正在压着 BOSS战 BGM 时，我们抽出且仍存活的 BOSS（空了就切回原曲）。</summary>
+	private static readonly List<TowerDefenseCharacter> _bossBgmWatch =
+		new List<TowerDefenseCharacter>();
+
+	/// <summary>当前是否已经切到 BOSS战（防重复切、并决定要不要切回）。</summary>
+	private static bool _bossBgmActive;
+
+	/// <summary>
+	/// 本次变身抽出了 BOSS ⇒ 记账并尝试切歌。
+	/// 由 <c>RandomImitater.RiExplode</c> 在生成新角色之后调用。
+	/// </summary>
+	internal static void NotifyBossSpawned(TowerDefenseCharacter boss)
+	{
+		try
+		{
+			if (boss == null || !GodotObject.IsInstanceValid(boss))
+			{
+				return;
+			}
+			if (!_bossBgmWatch.Contains(boss))
+			{
+				_bossBgmWatch.Add(boss);
+			}
+			if (_bossBgmActive)
+			{
+				return;   // 已经在放了，只补记账
+			}
+			TowerDefenseBattleFeatureBGM bgm = BossBgmFeature();
+			if (bgm == null)
+			{
+				return;
+			}
+			// 关卡本来就在放这首 ⇒ 不动，也不登记切回
+			TowerDefenseBackgroundMusicConfig cfg = bgm.backgroundMusicConfig;
+			if (cfg != null && GodotObject.IsInstanceValid(cfg)
+				&& string.Equals(cfg.flag1, BossBgmTrack, StringComparison.Ordinal))
+			{
+				_bossBgmWatch.Clear();
+				return;
+			}
+			// 与宿主 GameStart 完全同款：MUSIC 通道、起点 0、不随暂停存活
+			AudioStreamPlayerMember player = AudioManager.Instance.AudioPlay(
+				BossBgmTrack, AudioManagerEnum.TYPE.MUSIC, 0.0, false, false);
+			if (player == null || !GodotObject.IsInstanceValid(player))
+			{
+				return;
+			}
+			bgm.StopBGM();
+			bgm.backgroundAudio = player;
+			_bossBgmActive = true;
+			LogStatic("抽到 BOSS ⇒ 背景音乐切到「BOSS战」（" + BossBgmTrack + "）。");
+		}
+		catch
+		{
+			// 纯表现层：任何失败都不影响战斗。
+		}
+	}
+
+	/// <summary>
+	/// 逐帧收口：我们抽出的 BOSS 全都不在场了 ⇒ 把关卡原曲放回去。
+	/// </summary>
+	internal static void DriveBossBgm()
+	{
+		if (!_bossBgmActive)
+		{
+			return;
+		}
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr) || !mgr.IsGameRunning())
+			{
+				// 战斗已结束（结算 / 失败 / 退出）⇒ 只清状态不放曲，宿主自己会停乐。
+				_bossBgmActive = false;
+				_bossBgmWatch.Clear();
+				return;
+			}
+			for (int i = _bossBgmWatch.Count - 1; i >= 0; i--)
+			{
+				TowerDefenseCharacter c = _bossBgmWatch[i];
+				if (c == null || !GodotObject.IsInstanceValid(c) || c.die)
+				{
+					_bossBgmWatch.RemoveAt(i);
+				}
+			}
+			if (_bossBgmWatch.Count > 0)
+			{
+				return;
+			}
+			RestoreBossBgm("BOSS 已倒下");
+		}
+		catch
+		{
+		}
+	}
+
+	/// <summary>
+	/// 切回关卡原曲（走宿主 <c>GameStart</c>，原曲从头重播）。
+	/// 战斗已经结束（`IsGameRunning` 为假）时只清状态不放曲，免得在结算/失败画面里放歌。
+	/// </summary>
+	private static void RestoreBossBgm(string reason)
+	{
+		if (!_bossBgmActive)
+		{
+			_bossBgmWatch.Clear();
+			return;
+		}
+		_bossBgmActive = false;
+		_bossBgmWatch.Clear();
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr == null || !GodotObject.IsInstanceValid(mgr) || !mgr.IsGameRunning())
+			{
+				return;
+			}
+			TowerDefenseBattleFeatureBGM bgm = BossBgmFeature();
+			if (bgm == null)
+			{
+				return;
+			}
+			bgm.GameStart();
+			LogStatic("恢复关卡原背景音乐（" + reason + "）。");
+		}
+		catch
+		{
+		}
+	}
+
+	/// <summary>
+	/// 取战斗场景里的 BGM feature：`TowerDefenseControlNew.featureDictionary` 是公开的，
+	/// 按类型找出那一个（宿主没有公开的 GetBGMFeature）。找到后缓存，失效自动重找。
+	/// </summary>
+	private static TowerDefenseBattleFeatureBGM BossBgmFeature()
+	{
+		TowerDefenseManager mgr = TowerDefenseManager.Instance;
+		if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+		{
+			return null;
+		}
+		TowerDefenseControlNew control = mgr.currentControl;
+		if (control == null || !GodotObject.IsInstanceValid(control))
+		{
+			return null;
+		}
+		System.Collections.Generic.Dictionary<Godot.StringName, TowerDefenseBattleFeature>
+			features = control.featureDictionary;
+		if (features == null)
+		{
+			return null;
+		}
+		foreach (KeyValuePair<Godot.StringName, TowerDefenseBattleFeature> kv in features)
+		{
+			TowerDefenseBattleFeatureBGM bgm = kv.Value as TowerDefenseBattleFeatureBGM;
+			if (bgm != null && GodotObject.IsInstanceValid(bgm))
+			{
+				return bgm;
+			}
+		}
+		return null;
 	}
 
 	// ================================================================ 种植闸门
@@ -832,6 +1020,8 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 			RandomImitater.TickAllColorize();
 			// 抹掉「其实种不下去」的可种植残影（必须逐帧：影子每帧由宿主重画）。
 			DrivePlacementGhost();
+			// 抽出的 BOSS 全倒下后，把关卡原曲放回去。
+			DriveBossBgm();
 		}
 		catch (Exception ex)
 		{
@@ -3066,8 +3256,17 @@ public sealed class RandomImitaterEntry : IXWModRuntimeEntry
 				}
 			}
 
-			int plantEntries = plantList.Count * repP;
-			int zombieEntries = zombieList.Count * repZ;
+			// 实际比例按**列表内容**数出来，不用 repP/repZ 推算：
+			// 0% 与 100% 两个极端下 BuildWeighted 直接返回单边列表（此时 rep 仍是 1/1，
+			// 按公式推算会得出「335/302 = 110.9%」这种荒谬数字）。
+			int plantEntries = 0;
+			for (int i = 0; i < mixed.Count; i++)
+			{
+				if (PoolPlantKeys.Contains(mixed[i].AsString()))
+				{
+					plantEntries++;
+				}
+			}
 			double realChance = mixed.Count > 0 ? (double)plantEntries / mixed.Count : 0.0;
 			Log("已注册卡池 " + CustomBank + "：植物 " + plantList.Count + " 张 + 僵尸 "
 				+ zombieList.Count + " 只；每张植物 x" + repP + "、每只僵尸 x" + repZ
@@ -3829,6 +4028,45 @@ public partial class RandomImitater : TowerDefensePlantImitater
 		}
 	}
 
+	/// <summary>
+	/// 取「本次变身新出现的角色」，其中属于 BOSS 三类的交给 BGM 记账。
+	/// 判定口径与 <c>TowerDefenseBossHealthBarManager</c> 一致：只认
+	/// <c>TowerDefenseZombieBoss</c> / <c>...BossDave</c> / <c>...BossEdgarII</c>，
+	/// 巨人（<c>TowerDefenseZombieGargantuarBase</c> 一家）不算。
+	/// </summary>
+	private void ScanNewBosses(HashSet<TowerDefenseCharacter> before)
+	{
+		TowerDefenseManager mgr = TowerDefenseManager.Instance;
+		if (mgr == null || !GodotObject.IsInstanceValid(mgr))
+		{
+			return;
+		}
+		TowerDefenseBattleCharacterRegistry reg = mgr.characterRegistry;
+		if (reg == null)
+		{
+			return;
+		}
+		List<TowerDefenseCharacter> list = reg.GetActiveCharacters();
+		if (list == null)
+		{
+			return;
+		}
+		for (int i = 0; i < list.Count; i++)
+		{
+			TowerDefenseCharacter c = list[i];
+			if (c == null || before.Contains(c))
+			{
+				continue;
+			}
+			if (c is TowerDefenseZombieBoss
+				|| c is TowerDefenseZombieBossDave
+				|| c is TowerDefenseZombieBossEdgarII)
+			{
+				RandomImitaterEntry.NotifyBossSpawned(c);
+			}
+		}
+	}
+
 	/// <summary>变身前拍一张「场上已有角色」的快照，用于事后取差集。</summary>
 	private static HashSet<TowerDefenseCharacter> SnapshotActiveCharacters()
 	{
@@ -4198,15 +4436,12 @@ public partial class RandomImitater : TowerDefensePlantImitater
 	/// </summary>
 	private void RiExplode()
 	{
-		// 彩色化用：变身前先拍下场上已有角色，事后取差集就知道本次开出了什么。
+		// 彩色化 / BOSS 识别共用：变身前先拍下场上已有角色，事后取差集就知道本次开出了什么。
 		// 放在 try 外也要能拿到，所以先算好。
 		HashSet<TowerDefenseCharacter> before = null;
 		try
 		{
-			if (!_riColorUnavailable)
-			{
-				before = SnapshotActiveCharacters();
-			}
+			before = SnapshotActiveCharacters();
 		}
 		catch
 		{
@@ -4245,6 +4480,13 @@ public partial class RandomImitater : TowerDefensePlantImitater
 
 		try
 		{
+			// ②.4 BOSS 识别：本次变身若开出 BOSS，把背景音乐压成「BOSS战」。
+			//     角色注册（AddChild → _EnterTree）是同步的，当帧差集即可拿到。
+			if (before != null)
+			{
+				ScanNewBosses(before);
+			}
+
 			// ②.5 彩色化：开启一个观察窗，接下来几十帧持续取差集找出本次新生成的角色。
 			//      不能只做当帧差集 —— 角色注册进注册表的时机未必早于这一刻。
 			if (before != null)

@@ -73,7 +73,7 @@ CHAR_KEY = "RandomImitater"
 MOD_NAME = "随机模仿者"
 MOD_ID = "randomimitater"
 # 版本号单一来源：改这里就够了（mod.json 与 README 都以此为准）。
-MOD_VERSION = "1.9.1"
+MOD_VERSION = "1.10.0"
 CFG_FILE = "TowerDefensePlantRandomImitater.tres"
 SCENE_FILE = "RandomImitater.tscn"
 SPRITE_FILE = "RandomImitater.tscn"
@@ -103,8 +103,8 @@ PD = "完全随机的模仿者，惊喜和惊吓并存！"
 # 图鉴·描述：走内置卡的「字段块」格式
 # ⚠️ 这里的百分比要和 src/RandomImitaterEntry.cs 的 PlantChance 保持一致（现在是 0.65）。
 PHD = ("[color=FF0000]获取方式[/color]：[color=0000cd]Mod 植物（无需解锁）[/color]\\n"
-       "[color=0048FF]臻享钻卡：该植物价格通常固定，不受常规机制影响[/color]\\n"
        "\\n"
+       "[color=0048FF]臻享钻卡：该植物价格通常固定，不受常规机制影响[/color]\\n"
        "韧性：[color=cc241d]1000[/color]\\n"
        "特点：[color=cc241d]65%概率开出随机植物 35%概率开出随机僵尸（敌对）[/color]\\n")
 
