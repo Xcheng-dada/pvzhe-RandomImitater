@@ -1,0 +1,10 @@
+[gd_resource type="Resource" script_class="CharacterComponentSet" format=3]
+
+[ext_resource type="Resource" path="res://Asset/Anime/Character/Plant/Chapter0/Imitater/Scene/TowerDefensePlantImitaterExplodeDefinition.tres" id="1"]
+[ext_resource type="Resource" path="res://Prefab/TowerDefense/Character/ComponentSets/TowerDefensePlantComponentSet.tres" id="2"]
+[ext_resource type="Script" path="res://Script/Component/Runtime/CharacterComponentSet.cs" id="3"]
+
+[resource]
+script = ExtResource("3")
+ParentSet = ExtResource("2")
+Components = [ExtResource("1")]

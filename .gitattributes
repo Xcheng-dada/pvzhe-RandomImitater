@@ -1,0 +1,58 @@
+# ============================================================
+#  「随机模仿者」Mod —— Git 属性
+#
+#  作用：让「行尾」和「文本/二进制判定」跟着仓库走，
+#        而不是跟着每个开发者本机的 core.autocrlf 设置走。
+#
+#  为什么这对本仓库重要：
+#    Resources/ 下的 .tres / .tscn 会被原样打进 .pmod 包。
+#    如果 clone 后行尾被转成 CRLF，重新打包出来的字节就和发布版不同，
+#    README 里公示的 SHA-256 会对不上，维护者核对时会以为包被篡改。
+#    所以这些文件必须**始终**保持 LF。
+# ============================================================
+
+# ---- 默认：自动判定文本，且检出时统一用 LF ----
+# 本仓库所有文本文件（.cs/.json/.tres/.tscn/.md/.py）当前都是纯 LF、无 BOM。
+# eol=lf 保证任何平台 clone 下来都是 LF，字节与发布版一致。
+* text=auto eol=lf
+
+# ---- 明确标为二进制（禁止任何行尾转换）----
+# 这两个是打包产物，一旦被当作文本处理就会损坏。
+*.dll   binary
+*.pmod  binary
+*.pck   binary
+
+# 图片与压缩包（以后加截图时同样不能被转换）
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.zip   binary
+*.7z    binary
+*.rar   binary
+
+# ---- 游戏资源：强制 LF ----
+# 这两个格式是 Godot 的文本资源，直接进包，行尾必须可控。
+*.tres  text eol=lf
+*.tscn  text eol=lf
+*.godot text eol=lf
+
+# ---- 清单与源码：强制 LF ----
+*.json  text eol=lf
+*.cs    text eol=lf
+*.csproj text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+
+# ---- Windows 脚本：保留 CRLF ----
+# PowerShell / 批处理对行尾更敏感，且本机约定是 CRLF。
+# （当前仓库没有这类文件，此规则是给以后加脚本时兜底的。）
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# ---- 让 git 在 diff 和语言统计里正确识别 ----
+*.cs    diff=csharp
+*.tres  linguist-language=GDScript
+*.tscn  linguist-language=GDScript
